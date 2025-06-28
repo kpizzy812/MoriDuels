@@ -2,6 +2,9 @@
 aiogram
 aiofiles
 
+# User Bot (Telethon)
+telethon
+
 # Database
 psycopg2-binary
 SQLAlchemy
@@ -18,12 +21,16 @@ requests
 aiohttp
 httpx
 
+# Charts & Graphics
+matplotlib
+pandas
+numpy
+seaborn
+
 # Utils
 python-dotenv
 asyncio
 Pillow
-matplotlib
-pandas
 
 # Logging
 loguru

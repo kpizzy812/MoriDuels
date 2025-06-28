@@ -5,9 +5,13 @@ load_dotenv()
 
 # Telegram
 MAIN_BOT_TOKEN = os.getenv('MAIN_BOT_TOKEN')
-USER_BOT_TOKEN = os.getenv('USER_BOT_TOKEN')
 ADMIN_IDS = [int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
 CHANNEL_IDS = [int(x.strip()) for x in os.getenv('CHANNEL_IDS', '').split(',') if x.strip()]
+
+# Telegram User Bot
+TELEGRAM_API_ID = int(os.getenv('TELEGRAM_API_ID', '0'))
+TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH', '')
+TELEGRAM_PHONE = os.getenv('TELEGRAM_PHONE', '')
 
 # Database
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -28,6 +32,7 @@ BOT_WALLET_ADDRESS = os.getenv('BOT_WALLET_ADDRESS')
 # APIs
 JUPITER_API_KEY = os.getenv('JUPITER_API_KEY')
 HELIUM_API_KEY = os.getenv('HELIUM_API_KEY')
+BIRDEYE_API_KEY = os.getenv('BIRDEYE_API_KEY')
 
 # Game Settings
 HOUSE_ACCOUNTS = [x.strip() for x in os.getenv('HOUSE_ACCOUNTS', '').split(',') if x.strip()]

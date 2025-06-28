@@ -134,16 +134,23 @@ class JupiterService:
             return None
 
     async def generate_price_chart(self, token_mint: str, period: str = "24h") -> Optional[str]:
-        """Генерировать график цены (заглушка)"""
+        """Генерировать график цены"""
         try:
-            # В реальной реализации здесь был бы код для:
-            # 1. Получения исторических данных цены
-            # 2. Создания графика с matplotlib
-            # 3. Сохранения в static/images/
+            # Используем новый chart_service для создания графиков
+            from services.chart_service import chart_service
 
-            # Пока возвращаем None - график будет создаваться позже
-            logger.warning("⚠️ Price chart generation not implemented yet")
-            return None
+            chart_path = await chart_service.generate_candlestick_chart(
+                token_mint=token_mint,
+                period=period,
+                style="dark_yellow"
+            )
+
+            if chart_path:
+                logger.info(f"✅ Generated price chart: {chart_path}")
+                return chart_path
+            else:
+                logger.warning("⚠️ Failed to generate price chart")
+                return None
 
         except Exception as e:
             logger.error(f"❌ Error generating price chart: {e}")

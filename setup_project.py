@@ -56,7 +56,11 @@ def setup_project():
     files_config = {
         ".env": """# Telegram Bot Tokens
 MAIN_BOT_TOKEN=your_main_bot_token_here
-USER_BOT_TOKEN=your_user_bot_token_here
+
+# Telegram User Bot (получите на my.telegram.org)
+TELEGRAM_API_ID=your_api_id_here
+TELEGRAM_API_HASH=your_api_hash_here
+TELEGRAM_PHONE=+1234567890
 
 # Database
 DATABASE_URL=postgresql://username:password@localhost:5432/mori_duels
@@ -75,6 +79,9 @@ BOT_WALLET_ADDRESS=your_bot_wallet_address
 # Jupiter API
 JUPITER_API_KEY=your_jupiter_api_key
 HELIUM_API_KEY=your_helium_api_key
+
+# Birdeye API (для графиков)
+BIRDEYE_API_KEY=your_birdeye_api_key_optional
 
 # Admin Settings
 ADMIN_IDS=123456789,987654321
