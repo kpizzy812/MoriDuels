@@ -1,0 +1,36 @@
+# Telegram Bot
+aiogram
+aiofiles
+
+# Database
+psycopg2-binary
+SQLAlchemy
+alembic
+asyncpg
+
+# Solana
+solders
+solana
+anchorpy
+
+# Web3 & APIs
+requests
+aiohttp
+httpx
+
+# Utils
+python-dotenv
+asyncio
+Pillow
+matplotlib
+pandas
+
+# Logging
+loguru
+
+# Date/Time
+python-dateutil
+pytz
+
+# Validation
+pydantic
