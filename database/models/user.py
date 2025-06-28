@@ -169,5 +169,9 @@ class User(Base):
         """Получить общую прибыль/убыток"""
         return self.total_won - self.total_wagered
 
+    async def get_balance(self) -> Decimal:
+        """Получить текущий баланс"""
+        return self.balance
+
     def __repr__(self):
         return f"<User(id={self.id}, telegram_id={self.telegram_id}, balance={self.balance})>"

@@ -6,6 +6,7 @@ import asyncio
 from bots.main_bot import main_bot_polling
 from bots.user_bot import user_bot_polling
 from utils.logger import setup_logger
+from utils.create_dirs import create_required_directories
 
 logger = setup_logger(__name__)
 
@@ -15,6 +16,9 @@ async def main():
     logger.info("🚀 Запуск MORI Duels Bot...")
 
     try:
+        # Создаем необходимые папки
+        create_required_directories()
+
         # Запускаем оба бота параллельно
         await asyncio.gather(
             main_bot_polling(),
