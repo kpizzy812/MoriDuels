@@ -1,5 +1,5 @@
 """
-Подключение к базе данных PostgreSQL
+Подключение к базе данных (PostgreSQL или SQLite)
 """
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -53,6 +53,7 @@ async def init_db():
             from database.models.duel import Duel
             from database.models.transaction import Transaction
             from database.models.room import Room
+            from database.models.wallet_history import WalletHistory
 
             # Создаем все таблицы
             await conn.run_sync(Base.metadata.create_all)
