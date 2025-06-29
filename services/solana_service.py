@@ -13,6 +13,14 @@ from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
 from solana.rpc.types import TxOpts
 
+# SPL Token imports
+from spl.token.instructions import (
+    create_associated_token_account,
+    get_associated_token_address,
+    transfer_checked,
+    TransferCheckedParams
+)
+
 from config.settings import SOLANA_RPC_URL, BOT_PRIVATE_KEY, BOT_WALLET_ADDRESS, MORI_TOKEN_MINT
 from utils.logger import setup_logger
 
@@ -22,6 +30,8 @@ logger = setup_logger(__name__)
 def validate_solana_address(address: str) -> bool:
     """Валидация Solana адреса"""
     try:
+        if len(address) < 32 or len(address) > 44:
+            return False
         Pubkey.from_string(address)
         return True
     except Exception:
@@ -34,6 +44,7 @@ class SolanaService:
         self.bot_keypair = None
         self.bot_pubkey = None
         self.mori_mint = None
+        self.token_decimals = 6  # Большинство SPL токенов используют 6 decimals
 
         # Инициализируем кошелек бота
         self._init_bot_wallet()
@@ -72,11 +83,11 @@ class SolanaService:
             logger.error(f"❌ Error getting SOL balance for {address}: {e}")
             return None
 
-    async def get_token_balance(self, address: str, token_mint: str) -> Optional[Decimal]:
+    async def get_token_balance(self, address: str, token_mint: str = None) -> Optional[Decimal]:
         """Получить баланс токена"""
         try:
             pubkey = Pubkey.from_string(address)
-            mint_pubkey = Pubkey.from_string(token_mint)
+            mint_pubkey = Pubkey.from_string(token_mint or str(self.mori_mint))
 
             # Получаем токен аккаунты
             response = await self.client.get_token_accounts_by_owner(
@@ -108,6 +119,26 @@ class SolanaService:
         except Exception as e:
             logger.error(f"❌ Error getting token balance for {address}: {e}")
             return None
+
+    async def get_token_decimals(self, token_mint: str) -> int:
+        """Получить количество decimals токена"""
+        try:
+            mint_pubkey = Pubkey.from_string(token_mint)
+            response = await self.client.get_account_info(mint_pubkey)
+
+            if response.value and response.value.data:
+                # Парсим данные mint аккаунта (decimals находится на позиции 44)
+                data = response.value.data
+                if len(data) > 44:
+                    decimals = data[44]
+                    return decimals
+
+            # Fallback на стандартные 6 decimals
+            return 6
+
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get decimals for {token_mint}, using default 6: {e}")
+            return 6
 
     async def send_sol(self, to_address: str, amount: Decimal) -> Optional[str]:
         """Отправить SOL"""
@@ -156,36 +187,76 @@ class SolanaService:
             return None
 
     async def send_token(self, to_address: str, amount: Decimal, token_mint: str = None) -> Optional[str]:
-        """Отправить токены"""
+        """Отправить SPL токены"""
         try:
             if not self.bot_keypair:
                 logger.error("❌ Bot keypair not initialized")
                 return None
 
-            mint = token_mint or str(self.mori_mint)
-            if not mint:
-                logger.error("❌ Token mint not specified")
-                return None
+            mint_pubkey = Pubkey.from_string(token_mint or str(self.mori_mint))
+            to_pubkey = Pubkey.from_string(to_address)
 
-            # ВРЕМЕННАЯ ЗАГЛУШКА - для демонстрации
-            # В реальности здесь должна быть логика отправки SPL токенов:
-            # 1. Поиск Associated Token Accounts
-            # 2. Создание ATA если не существует
-            # 3. Создание transfer инструкции для SPL токена
+            # Получаем decimals токена
+            decimals = await self.get_token_decimals(str(mint_pubkey))
 
-            logger.warning(f"⚠️ Token transfer mock: {amount} MORI to {to_address[:8]}...")
+            # Конвертируем amount с учетом decimals
+            token_amount = int(amount * Decimal(10 ** decimals))
 
-            # Имитируем задержку сети
-            await asyncio.sleep(1)
+            # Получаем Associated Token Accounts
+            from_ata = get_associated_token_address(self.bot_pubkey, mint_pubkey)
+            to_ata = get_associated_token_address(to_pubkey, mint_pubkey)
 
-            # Возвращаем фейковый хеш транзакции
-            import hashlib
-            import time
-            mock_data = f"{to_address}{amount}{time.time()}"
-            mock_hash = hashlib.sha256(mock_data.encode()).hexdigest()
+            instructions = []
 
-            logger.info(f"✅ Mock token transfer completed: TX {mock_hash[:16]}...")
-            return mock_hash
+            # Проверяем, существует ли ATA получателя
+            to_ata_info = await self.client.get_account_info(to_ata)
+            if not to_ata_info.value:
+                # Создаем ATA для получателя
+                create_ata_ix = create_associated_token_account(
+                    payer=self.bot_pubkey,
+                    owner=to_pubkey,
+                    mint=mint_pubkey
+                )
+                instructions.append(create_ata_ix)
+                logger.info(f"📝 Creating ATA for {to_address[:8]}...")
+
+            # Создаем инструкцию transfer
+            transfer_ix = transfer_checked(
+                TransferCheckedParams(
+                    program_id=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),  # SPL Token Program
+                    source=from_ata,
+                    mint=mint_pubkey,
+                    dest=to_ata,
+                    owner=self.bot_pubkey,
+                    amount=token_amount,
+                    decimals=decimals
+                )
+            )
+            instructions.append(transfer_ix)
+
+            # Получаем последний blockhash
+            recent_blockhash = await self.client.get_latest_blockhash()
+
+            # Создаем и подписываем транзакцию
+            transaction = Transaction.new_with_payer(
+                instructions,
+                self.bot_pubkey
+            )
+            transaction.sign([self.bot_keypair], recent_blockhash.value.blockhash)
+
+            # Отправляем транзакцию
+            result = await self.client.send_transaction(
+                transaction,
+                opts=TxOpts(skip_preflight=False)  # Включаем preflight для SPL транзакций
+            )
+
+            if result.value:
+                tx_hash = str(result.value)
+                logger.info(f"✅ Sent {amount} tokens to {to_address[:8]}... TX: {tx_hash[:8]}...")
+                return tx_hash
+
+            logger.error("❌ Failed to send token transaction")
+            return None
 
         except Exception as e:
             logger.error(f"❌ Error sending tokens to {to_address}: {e}")
@@ -194,15 +265,6 @@ class SolanaService:
     async def check_transaction(self, tx_hash: str) -> Optional[Dict[str, Any]]:
         """Проверить статус транзакции"""
         try:
-            # Если это mock транзакция (хеш длиннее 64 символов), возвращаем "подтверждено"
-            if len(tx_hash) == 64 and tx_hash.startswith(('a', 'b', 'c', 'd', 'e', 'f')):
-                return {
-                    "confirmed": True,
-                    "slot": 12345678,
-                    "block_time": 1640995200,
-                    "fee": 5000
-                }
-
             from solders.signature import Signature
             signature = Signature.from_string(tx_hash)
 
@@ -225,6 +287,60 @@ class SolanaService:
             logger.error(f"❌ Error checking transaction {tx_hash}: {e}")
             return None
 
+    async def parse_token_transfer(self, tx_hash: str) -> Optional[Dict[str, Any]]:
+        """Парсинг SPL token transfer из транзакции"""
+        try:
+            from solders.signature import Signature
+            signature = Signature.from_string(tx_hash)
+
+            response = await self.client.get_transaction(
+                signature,
+                commitment=Confirmed
+            )
+
+            if not response.value or not response.value.transaction.meta:
+                return None
+
+            meta = response.value.transaction.meta
+
+            # Ищем изменения в токен аккаунтах
+            pre_token_balances = meta.pre_token_balances or []
+            post_token_balances = meta.post_token_balances or []
+
+            for pre_balance in pre_token_balances:
+                # Находим соответствующий post balance
+                post_balance = None
+                for pb in post_token_balances:
+                    if pb.account_index == pre_balance.account_index:
+                        post_balance = pb
+                        break
+
+                if post_balance and pre_balance.mint == str(self.mori_mint):
+                    # Рассчитываем изменение
+                    pre_amount = Decimal(pre_balance.ui_token_amount.amount)
+                    post_amount = Decimal(post_balance.ui_token_amount.amount)
+
+                    if post_amount > pre_amount:
+                        # Это пополнение
+                        amount = (post_amount - pre_amount) / Decimal(10 ** post_balance.ui_token_amount.decimals)
+
+                        # Получаем адрес владельца аккаунта
+                        account_info = response.value.transaction.transaction.message.account_keys[pre_balance.account_index]
+
+                        return {
+                            "type": "deposit",
+                            "amount": amount,
+                            "token_mint": pre_balance.mint,
+                            "account": str(account_info),
+                            "decimals": post_balance.ui_token_amount.decimals
+                        }
+
+            return None
+
+        except Exception as e:
+            logger.error(f"❌ Error parsing token transfer {tx_hash}: {e}")
+            return None
+
     async def monitor_address_for_deposits(self, address: str, callback_func) -> None:
         """Мониторинг адреса для депозитов"""
         try:
@@ -244,7 +360,7 @@ class SolanaService:
             logger.info(f"🔍 Started monitoring {address[:8]}... for deposits")
 
             while True:
-                await asyncio.sleep(10)  # Проверяем каждые 10 секунд
+                await asyncio.sleep(30)  # Проверяем каждые 30 секунд
 
                 # Получаем новые подписи
                 new_signatures_response = await self.client.get_signatures_for_address(
@@ -255,16 +371,74 @@ class SolanaService:
 
                 if new_signatures_response.value:
                     for sig_info in reversed(new_signatures_response.value):
-                        # Получаем детали транзакции
-                        tx_details = await self.check_transaction(str(sig_info.signature))
-                        if tx_details and tx_details.get("confirmed"):
-                            await callback_func(address, str(sig_info.signature), tx_details)
+                        # Парсим транзакцию на предмет токен трансферов
+                        transfer_info = await self.parse_token_transfer(str(sig_info.signature))
+                        if transfer_info:
+                            await callback_func(address, str(sig_info.signature), transfer_info)
 
                     # Обновляем последнюю подпись
                     last_signature = new_signatures_response.value[0].signature
 
         except Exception as e:
             logger.error(f"❌ Error monitoring address {address}: {e}")
+
+    async def get_recent_token_transactions(self, address: str, limit: int = 10) -> list:
+        """Получить последние токен транзакции"""
+        try:
+            pubkey = Pubkey.from_string(address)
+
+            signatures_response = await self.client.get_signatures_for_address(
+                pubkey,
+                limit=limit,
+                commitment=Confirmed
+            )
+
+            transactions = []
+            if signatures_response.value:
+                for sig_info in signatures_response.value:
+                    transfer_info = await self.parse_token_transfer(str(sig_info.signature))
+                    if transfer_info:
+                        transactions.append({
+                            "signature": str(sig_info.signature),
+                            "block_time": sig_info.block_time,
+                            **transfer_info
+                        })
+
+            return transactions
+
+        except Exception as e:
+            logger.error(f"❌ Error getting recent transactions for {address}: {e}")
+            return []
+
+    async def validate_token_mint_info(self, token_mint: str) -> Dict[str, Any]:
+        """Получить информацию о токен mint"""
+        try:
+            mint_pubkey = Pubkey.from_string(token_mint)
+            response = await self.client.get_account_info(mint_pubkey)
+
+            if response.value and response.value.data:
+                data = response.value.data
+
+                # Парсим основные данные mint аккаунта
+                # Структура: https://docs.rs/spl-token/latest/spl_token/state/struct.Mint.html
+                if len(data) >= 82:
+                    supply_bytes = data[36:44]
+                    decimals = data[44]
+
+                    supply = int.from_bytes(supply_bytes, 'little')
+
+                    return {
+                        "valid": True,
+                        "supply": supply,
+                        "decimals": decimals,
+                        "supply_ui": supply / (10 ** decimals)
+                    }
+
+            return {"valid": False, "error": "Invalid mint account"}
+
+        except Exception as e:
+            logger.error(f"❌ Error validating token mint {token_mint}: {e}")
+            return {"valid": False, "error": str(e)}
 
     async def close(self):
         """Закрыть соединение"""

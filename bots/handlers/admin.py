@@ -11,9 +11,11 @@ from aiogram.filters import Command
 from database.models.user import User
 from database.models.duel import Duel, DuelStatus
 from database.models.transaction import Transaction, TransactionType, TransactionStatus
+from database.connection import async_session
 from services.game_service import game_service
 from config.settings import ADMIN_IDS
 from utils.logger import setup_logger
+from sqlalchemy import text
 
 router = Router()
 logger = setup_logger(__name__)
@@ -83,12 +85,12 @@ async def admin_users(callback: CallbackQuery):
 
     users_text = "👥 Топ пользователей:\n\n"
 
-    for i, user in enumerate(top_users, 1):
-        username = user.username if user.username else f"User {user.telegram_id}"
+    for i, user_data in enumerate(top_users, 1):
+        username = user_data['username'] if user_data['username'] else f"User {user_data['telegram_id']}"
         users_text += f"{i}. @{username}\n"
-        users_text += f"   💰 Баланс: {user.balance:,.0f} MORI\n"
-        users_text += f"   🎮 Игр: {user.total_games} (🏆 {user.wins})\n"
-        users_text += f"   📈 Прибыль: {user.get_profit():+,.0f} MORI\n\n"
+        users_text += f"   💰 Баланс: {user_data['balance']:,.0f} MORI\n"
+        users_text += f"   🎮 Игр: {user_data['total_games']} (🏆 {user_data['wins']})\n"
+        users_text += f"   📈 Прибыль: {user_data['profit']:+,.0f} MORI\n\n"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -120,19 +122,17 @@ async def admin_duels(callback: CallbackQuery):
         duels_text += "🔍 Нет активных дуэлей"
     else:
         for duel in active_duels[:10]:
-            player1 = await User.get_by_telegram_id(duel.player1_id)
-            player1_name = player1.username if player1 and player1.username else f"User {duel.player1_id}"
+            player1_name = duel['player1_username'] if duel['player1_username'] else f"User {duel['player1_id']}"
 
-            if duel.is_house_duel:
-                duels_text += f"🤖 Дуэль #{duel.id}\n"
-                duels_text += f"   👤 @{player1_name} vs {duel.house_account_name}\n"
-                duels_text += f"   💰 Ставка: {duel.stake:,.0f} MORI\n\n"
+            if duel['is_house_duel']:
+                duels_text += f"🤖 Дуэль #{duel['id']}\n"
+                duels_text += f"   👤 @{player1_name} vs {duel['house_account_name']}\n"
+                duels_text += f"   💰 Ставка: {duel['stake']:,.0f} MORI\n\n"
             else:
-                player2 = await User.get_by_telegram_id(duel.player2_id) if duel.player2_id else None
-                player2_name = player2.username if player2 and player2.username else f"User {duel.player2_id}"
-                duels_text += f"👥 Дуэль #{duel.id}\n"
+                player2_name = duel['player2_username'] if duel['player2_username'] else f"User {duel['player2_id']}"
+                duels_text += f"👥 Дуэль #{duel['id']}\n"
                 duels_text += f"   👤 @{player1_name} vs @{player2_name}\n"
-                duels_text += f"   💰 Ставка: {duel.stake:,.0f} MORI\n\n"
+                duels_text += f"   💰 Ставка: {duel['stake']:,.0f} MORI\n\n"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -156,7 +156,7 @@ async def admin_house_duels(callback: CallbackQuery):
         return
 
     # Получаем активные house дуэли
-    house_duels = await get_active_house_duels()
+    house_duels = await game_service.get_active_house_duels()
 
     if not house_duels:
         await callback.message.edit_text(
@@ -249,28 +249,36 @@ async def admin_transactions(callback: CallbackQuery):
 
     # Получаем последние транзакции
     recent_transactions = await get_recent_transactions(limit=10)
-    pending_transactions = await Transaction.get_pending_transactions()
+    pending_count = await get_pending_transactions_count()
 
     trans_text = f"💰 Транзакции\n\n"
-    trans_text += f"⏳ Ожидающих: {len(pending_transactions)}\n\n"
+    trans_text += f"⏳ Ожидающих: {pending_count}\n\n"
 
     if recent_transactions:
         trans_text += "📝 Последние 10 транзакций:\n\n"
         for tx in recent_transactions:
-            user = await User.get_by_telegram_id(tx.user_id) if hasattr(tx, 'user_id') else None
-            username = user.username if user and user.username else f"User {tx.user_id if hasattr(tx, 'user_id') else 'Unknown'}"
+            username = tx['username'] if tx['username'] else f"User {tx['user_id']}"
 
             status_emoji = {
-                TransactionStatus.COMPLETED: "✅",
-                TransactionStatus.PENDING: "⏳",
-                TransactionStatus.FAILED: "❌",
-                TransactionStatus.CANCELLED: "🚫"
-            }.get(tx.status, "❓")
+                "completed": "✅",
+                "pending": "⏳",
+                "failed": "❌",
+                "cancelled": "🚫"
+            }.get(tx['status'], "❓")
 
-            trans_text += f"{status_emoji} {tx.get_display_type()}\n"
+            type_names = {
+                "deposit": "💰 Пополнение",
+                "withdrawal": "💸 Вывод",
+                "duel_stake": "🎮 Ставка",
+                "duel_win": "🏆 Выигрыш",
+                "commission": "💼 Комиссия"
+            }
+            type_name = type_names.get(tx['type'], tx['type'])
+
+            trans_text += f"{status_emoji} {type_name}\n"
             trans_text += f"   👤 @{username}\n"
-            trans_text += f"   💰 {tx.amount:+,.2f} MORI\n"
-            trans_text += f"   📅 {tx.created_at.strftime('%d.%m %H:%M')}\n\n"
+            trans_text += f"   💰 {tx['amount']:+,.2f} MORI\n"
+            trans_text += f"   📅 {tx['created_at'].strftime('%d.%m %H:%M')}\n\n"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -337,69 +345,430 @@ async def admin_detailed_stats(callback: CallbackQuery):
     await callback.answer()
 
 
-# Вспомогательные функции для получения данных
+# РЕАЛЬНЫЕ функции для получения данных из БД
 async def get_admin_stats() -> dict:
     """Получить основную статистику для админки"""
-    # В реальной реализации здесь были бы запросы к БД
-    # Пока возвращаем заглушки
-    return {
-        'users_count': 127,
-        'total_games': 1250,
-        'total_volume': 125000,
-        'total_commission': 37500,
-        'new_users_24h': 5,
-        'games_24h': 45,
-        'volume_24h': 8500,
-        'active_house_duels': 2,
-        'total_house_games': 850
-    }
+    async with async_session() as session:
+        try:
+            # Общая статистика
+            result = await session.execute(text("""
+                SELECT 
+                    (SELECT COUNT(*) FROM users) as users_count,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished') as total_games,
+                    (SELECT COALESCE(SUM(stake * 2), 0) FROM duels WHERE status = 'finished') as total_volume,
+                    (SELECT COALESCE(SUM(house_commission), 0) FROM duels WHERE status = 'finished') as total_commission,
+                    (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '24 hours') as new_users_24h,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished' AND finished_at >= NOW() - INTERVAL '24 hours') as games_24h,
+                    (SELECT COALESCE(SUM(stake * 2), 0) FROM duels WHERE status = 'finished' AND finished_at >= NOW() - INTERVAL '24 hours') as volume_24h,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'active' AND is_house_duel = true) as active_house_duels,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished' AND is_house_duel = true) as total_house_games
+            """))
+
+            stats = result.fetchone()
+            return {
+                'users_count': stats.users_count,
+                'total_games': stats.total_games,
+                'total_volume': float(stats.total_volume),
+                'total_commission': float(stats.total_commission),
+                'new_users_24h': stats.new_users_24h,
+                'games_24h': stats.games_24h,
+                'volume_24h': float(stats.volume_24h),
+                'active_house_duels': stats.active_house_duels,
+                'total_house_games': stats.total_house_games
+            }
+        except Exception as e:
+            logger.error(f"❌ Error getting admin stats: {e}")
+            return {'users_count': 0, 'total_games': 0, 'total_volume': 0, 'total_commission': 0,
+                   'new_users_24h': 0, 'games_24h': 0, 'volume_24h': 0, 'active_house_duels': 0, 'total_house_games': 0}
 
 
 async def get_top_users(limit: int = 10) -> list:
     """Получить топ пользователей"""
-    # Заглушка - в реальности запрос к БД
-    return []
+    async with async_session() as session:
+        try:
+            result = await session.execute(text("""
+                SELECT 
+                    telegram_id, username, balance, total_games, wins,
+                    (total_won - total_wagered) as profit
+                FROM users 
+                WHERE total_games > 0
+                ORDER BY profit DESC, total_games DESC
+                LIMIT :limit
+            """), {"limit": limit})
+
+            return [dict(row._mapping) for row in result.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Error getting top users: {e}")
+            return []
 
 
 async def get_active_duels() -> list:
     """Получить активные дуэли"""
-    # Заглушка - в реальности запрос к БД
-    return []
+    async with async_session() as session:
+        try:
+            result = await session.execute(text("""
+                SELECT 
+                    d.id, d.stake, d.is_house_duel, d.house_account_name,
+                    d.player1_id, d.player2_id,
+                    u1.username as player1_username,
+                    u2.username as player2_username
+                FROM duels d
+                LEFT JOIN users u1 ON d.player1_id = u1.telegram_id
+                LEFT JOIN users u2 ON d.player2_id = u2.telegram_id
+                WHERE d.status = 'active'
+                ORDER BY d.created_at DESC
+            """))
 
-
-async def get_active_house_duels() -> list:
-    """Получить активные House дуэли"""
-    # Заглушка - в реальности запрос к БД
-    return []
+            return [dict(row._mapping) for row in result.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Error getting active duels: {e}")
+            return []
 
 
 async def get_recent_transactions(limit: int = 10) -> list:
     """Получить последние транзакции"""
-    # Заглушка - в реальности запрос к БД
-    return []
+    async with async_session() as session:
+        try:
+            result = await session.execute(text("""
+                SELECT 
+                    t.type, t.amount, t.status, t.created_at,
+                    u.username, u.telegram_id as user_id
+                FROM transactions t
+                LEFT JOIN users u ON t.user_id = u.id
+                ORDER BY t.created_at DESC
+                LIMIT :limit
+            """), {"limit": limit})
+
+            return [dict(row._mapping) for row in result.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Error getting recent transactions: {e}")
+            return []
+
+
+async def get_pending_transactions_count() -> int:
+    """Получить количество ожидающих транзакций"""
+    async with async_session() as session:
+        try:
+            result = await session.execute(text("""
+                SELECT COUNT(*) FROM transactions WHERE status = 'pending'
+            """))
+            return result.scalar()
+        except Exception as e:
+            logger.error(f"❌ Error getting pending transactions count: {e}")
+            return 0
 
 
 async def get_detailed_stats() -> dict:
     """Получить детальную статистику"""
-    # Заглушка - в реальности сложные запросы к БД
-    return {
-        'total_user_balance': 45000,
-        'total_volume': 125000,
-        'total_commission': 37500,
-        'total_winnings': 87500,
-        'total_duels': 1250,
-        'house_duels': 850,
-        'real_duels': 400,
-        'house_percentage': 68.0,
-        'avg_stake': 100,
-        'total_users': 127,
-        'active_users': 89,
-        'new_users_week': 23,
-        'avg_balance': 354,
-        'games_per_day': 41.7,
-        'volume_per_day': 4167,
-        'commission_per_day': 1250
-    }
+    async with async_session() as session:
+        try:
+            result = await session.execute(text("""
+                SELECT 
+                    (SELECT COALESCE(SUM(balance), 0) FROM users) as total_user_balance,
+                    (SELECT COALESCE(SUM(stake * 2), 0) FROM duels WHERE status = 'finished') as total_volume,
+                    (SELECT COALESCE(SUM(house_commission), 0) FROM duels WHERE status = 'finished') as total_commission,
+                    (SELECT COALESCE(SUM(winner_amount), 0) FROM duels WHERE status = 'finished' AND winner_amount IS NOT NULL) as total_winnings,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished') as total_duels,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished' AND is_house_duel = true) as house_duels,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished' AND is_house_duel = false) as real_duels,
+                    (SELECT COALESCE(AVG(stake), 0) FROM duels WHERE status = 'finished') as avg_stake,
+                    (SELECT COUNT(*) FROM users) as total_users,
+                    (SELECT COUNT(*) FROM users WHERE total_games > 0) as active_users,
+                    (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days') as new_users_week,
+                    (SELECT COALESCE(AVG(balance), 0) FROM users) as avg_balance
+            """))
+
+            stats = result.fetchone()
+
+            # Рассчитываем дополнительные метрики
+            house_percentage = (stats.house_duels / max(stats.total_duels, 1)) * 100
+            games_per_day = stats.total_duels / max(1, 30)  # За последние 30 дней
+            volume_per_day = float(stats.total_volume) / max(1, 30)
+            commission_per_day = float(stats.total_commission) / max(1, 30)
+
+            return {
+                'total_user_balance': float(stats.total_user_balance),
+                'total_volume': float(stats.total_volume),
+                'total_commission': float(stats.total_commission),
+                'total_winnings': float(stats.total_winnings),
+                'total_duels': stats.total_duels,
+                'house_duels': stats.house_duels,
+                'real_duels': stats.real_duels,
+                'house_percentage': house_percentage,
+                'avg_stake': float(stats.avg_stake),
+                'total_users': stats.total_users,
+                'active_users': stats.active_users,
+                'new_users_week': stats.new_users_week,
+                'avg_balance': float(stats.avg_balance),
+                'games_per_day': games_per_day,
+                'volume_per_day': volume_per_day,
+                'commission_per_day': commission_per_day
+            }
+        except Exception as e:
+            logger.error(f"❌ Error getting detailed stats: {e}")
+            return {'total_user_balance': 0, 'total_volume': 0, 'total_commission': 0, 'total_winnings': 0,
+                   'total_duels': 0, 'house_duels': 0, 'real_duels': 0, 'house_percentage': 0, 'avg_stake': 0,
+                   'total_users': 0, 'active_users': 0, 'new_users_week': 0, 'avg_balance': 0,
+                   'games_per_day': 0, 'volume_per_day': 0, 'commission_per_day': 0}
+
+
+@router.callback_query(F.data == "admin_settings")
+async def admin_settings(callback: CallbackQuery):
+    """Настройки системы"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+
+    # Получаем статистику мониторинга
+    from services.deposit_monitor import deposit_monitor
+    monitor_stats = await deposit_monitor.get_monitoring_stats()
+
+    settings_text = f"""⚙️ Настройки системы
+
+🔍 Мониторинг депозитов:
+• Статус: {"🟢 Активен" if monitor_stats.get("monitoring") else "🔴 Остановлен"}
+• Последняя TX: {monitor_stats.get("last_signature", "Нет")}
+• Кеш: {monitor_stats.get("processed_cache_size", 0)} транзакций
+
+📊 Депозиты за 24ч:
+• Количество: {monitor_stats.get("deposits_24h", {}).get("count", 0)}
+• Сумма: {monitor_stats.get("deposits_24h", {}).get("sum", 0):,.0f} MORI
+
+💰 Общие депозиты:
+• Всего: {monitor_stats.get("deposits_total", {}).get("count", 0)}
+• Сумма: {monitor_stats.get("deposits_total", {}).get("sum", 0):,.0f} MORI
+• Ожидающих: {monitor_stats.get("deposits_total", {}).get("pending", 0)}
+
+🔧 Версия бота: v1.0.0"""
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Принудительная проверка", callback_data="admin_force_check"),
+            InlineKeyboardButton(text="📊 Статистика Solana", callback_data="admin_solana_stats")
+        ],
+        [
+            InlineKeyboardButton(text="🧹 Очистка expired rooms", callback_data="admin_cleanup_rooms")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")
+        ]
+    ])
+
+    await callback.message.edit_text(settings_text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_force_check")
+async def admin_force_check(callback: CallbackQuery):
+    """Принудительная проверка депозитов"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+
+    await callback.answer("🔄 Запускаю принудительную проверку...", show_alert=True)
+
+    try:
+        from services.deposit_monitor import deposit_monitor
+        result = await deposit_monitor.force_check_deposits()
+
+        if result.get("success"):
+            await callback.message.edit_text(
+                "✅ Принудительная проверка завершена!\n\n"
+                "Все новые депозиты обработаны.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_settings")]
+                ])
+            )
+        else:
+            await callback.message.edit_text(
+                f"❌ Ошибка проверки:\n{result.get('error', 'Неизвестная ошибка')}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_settings")]
+                ])
+            )
+
+    except Exception as e:
+        logger.error(f"❌ Error in force check: {e}")
+        await callback.message.edit_text(
+            f"❌ Ошибка при принудительной проверке: {e}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_settings")]
+            ])
+        )
+
+
+@router.callback_query(F.data == "admin_cleanup_rooms")
+async def admin_cleanup_rooms(callback: CallbackQuery):
+    """Очистка истекших комнат"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+
+    try:
+        from database.models.room import Room
+        cleaned_count = await Room.cleanup_expired_rooms()
+
+        await callback.answer(f"🧹 Очищено комнат: {cleaned_count}", show_alert=True)
+
+    except Exception as e:
+        logger.error(f"❌ Error cleaning rooms: {e}")
+        await callback.answer("❌ Ошибка очистки комнат", show_alert=True)
+
+
+@router.callback_query(F.data == "admin_solana_stats")
+async def admin_solana_stats(callback: CallbackQuery):
+    """Статистика Solana"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+
+    try:
+        from services.solana_service import solana_service
+
+        # Получаем баланс бота
+        bot_sol_balance = await solana_service.get_sol_balance(BOT_WALLET_ADDRESS)
+        bot_mori_balance = await solana_service.get_token_balance(BOT_WALLET_ADDRESS, MORI_TOKEN_MINT)
+
+        # Проверяем валидность MORI mint
+        mint_info = await solana_service.validate_token_mint_info(MORI_TOKEN_MINT)
+
+        stats_text = f"""📊 Статистика Solana
+
+🤖 Кошелек бота:
+• Адрес: {BOT_WALLET_ADDRESS[:8]}...{BOT_WALLET_ADDRESS[-4:]}
+• SOL баланс: {bot_sol_balance or 0:.4f} SOL
+• MORI баланс: {bot_mori_balance or 0:,.2f} MORI
+
+🪙 MORI токен:
+• Mint: {MORI_TOKEN_MINT[:8]}...{MORI_TOKEN_MINT[-4:]}
+• Валидность: {"✅ Валиден" if mint_info.get("valid") else "❌ Невалиден"}"""
+
+        if mint_info.get("valid"):
+            stats_text += f"""
+• Decimals: {mint_info.get("decimals", "N/A")}
+• Supply: {mint_info.get("supply_ui", 0):,.0f} MORI"""
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_settings")]
+        ])
+
+        await callback.message.edit_text(stats_text, reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"❌ Error getting Solana stats: {e}")
+        await callback.message.edit_text(
+            f"❌ Ошибка получения статистики Solana: {e}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_settings")]
+            ])
+        )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_search_user")
+async def admin_search_user(callback: CallbackQuery):
+    """Поиск пользователя"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+
+    # TODO: Реализовать через FSM состояния
+    await callback.message.edit_text(
+        """🔍 Поиск пользователя
+
+В разработке... 
+Пока используйте основную статистику.
+
+Планируемые функции:
+• Поиск по Telegram ID
+• Поиск по username  
+• Поиск по адресу кошелька
+• Детальная информация о пользователе""",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
+        ])
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_pending_tx")
+async def admin_pending_transactions(callback: CallbackQuery):
+    """Ожидающие транзакции"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+
+    try:
+        # Получаем ожидающие транзакции
+        pending_txs = await get_pending_transactions_details()
+
+        if not pending_txs:
+            await callback.message.edit_text(
+                "💰 Ожидающие транзакции\n\n✅ Нет ожидающих транзакций",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_transactions")]
+                ])
+            )
+            await callback.answer()
+            return
+
+        pending_text = f"⏳ Ожидающие транзакции ({len(pending_txs)}):\n\n"
+
+        for tx in pending_txs[:10]:  # Показываем первые 10
+            username = tx['username'] if tx['username'] else f"User {tx['user_id']}"
+
+            type_names = {
+                "deposit": "💰 Пополнение",
+                "withdrawal": "💸 Вывод",
+                "duel_stake": "🎮 Ставка",
+                "duel_win": "🏆 Выигрыш"
+            }
+            type_name = type_names.get(tx['type'], tx['type'])
+
+            pending_text += f"#{tx['id']} {type_name}\n"
+            pending_text += f"   👤 @{username}\n"
+            pending_text += f"   💰 {tx['amount']:,.2f} MORI\n"
+            pending_text += f"   📅 {tx['created_at'].strftime('%d.%m %H:%M')}\n\n"
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_pending_tx")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_transactions")]
+        ])
+
+        await callback.message.edit_text(pending_text, reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"❌ Error getting pending transactions: {e}")
+        await callback.message.edit_text(
+            "❌ Ошибка получения ожидающих транзакций",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_transactions")]
+            ])
+        )
+
+    await callback.answer()
+
+
+async def get_pending_transactions_details() -> list:
+    """Получить детали ожидающих транзакций"""
+    async with async_session() as session:
+        try:
+            result = await session.execute(text("""
+                SELECT 
+                    t.id, t.type, t.amount, t.created_at,
+                    u.username, u.telegram_id as user_id
+                FROM transactions t
+                LEFT JOIN users u ON t.user_id = u.id
+                WHERE t.status = 'pending'
+                ORDER BY t.created_at DESC
+                LIMIT 20
+            """))
+
+            return [dict(row._mapping) for row in result.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Error getting pending transaction details: {e}")
+            return []
 
 
 @router.callback_query(F.data == "admin_panel")

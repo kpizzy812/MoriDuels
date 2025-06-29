@@ -147,7 +147,7 @@ async def process_new_wallet_address(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
     try:
-        # Валидация адреса Solana
+        # Базовая валидация адреса Solana
         if not validate_solana_address(new_address):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отмена", callback_data="wallet")]
@@ -166,22 +166,127 @@ async def process_new_wallet_address(message: Message, state: FSMContext):
             )
             return
 
+        # Показываем процесс проверки
+        checking_msg = await message.answer("🔍 Проверяем кошелек в сети Solana...")
+
+        # Расширенная валидация - проверяем существование в сети
+        from services.solana_service import solana_service
+
+        try:
+            # Проверяем, существует ли кошелек в сети
+            sol_balance = await solana_service.get_sol_balance(new_address)
+
+            if sol_balance is None:
+                await checking_msg.edit_text(
+                    """⚠️ Внимание! Кошелек не найден в сети Solana
+
+Возможные причины:
+• Кошелек еще не активирован (не получал SOL)
+• Ошибка в адресе
+
+Вы все еще хотите привязать этот адрес?""",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="✅ Да, привязать", callback_data=f"confirm_wallet_{new_address}"),
+                            InlineKeyboardButton(text="❌ Отмена", callback_data="wallet")
+                        ]
+                    ])
+                )
+                await state.clear()
+                return
+
+            elif sol_balance == 0:
+                await checking_msg.edit_text(
+                    f"""⚠️ Кошелек найден, но баланс SOL: 0
+
+Для получения токенов нужно иметь небольшое количество SOL для газа (~0.001 SOL)
+
+Рекомендуем пополнить кошелек SOL перед использованием.
+
+Привязать этот кошелек?""",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="✅ Да, привязать", callback_data=f"confirm_wallet_{new_address}"),
+                            InlineKeyboardButton(text="❌ Отмена", callback_data="wallet")
+                        ]
+                    ])
+                )
+                await state.clear()
+                return
+
+            else:
+                # Кошелек существует и имеет SOL - все хорошо
+                await checking_msg.edit_text(
+                    f"""✅ Кошелек проверен!
+
+💰 SOL баланс: {sol_balance:.4f} SOL
+🟢 Статус: Активен
+
+Привязать этот кошелек?""",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="✅ Да, привязать", callback_data=f"confirm_wallet_{new_address}"),
+                            InlineKeyboardButton(text="❌ Отмена", callback_data="wallet")
+                        ]
+                    ])
+                )
+                await state.clear()
+                return
+
+        except Exception as e:
+            logger.error(f"❌ Error checking wallet in network: {e}")
+            await checking_msg.edit_text(
+                """⚠️ Не удалось проверить кошелек в сети
+
+Возможно, проблемы с RPC-узлом Solana.
+Адрес валиден, но сетевая проверка недоступна.
+
+Привязать этот кошелек?""",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="✅ Да, привязать", callback_data=f"confirm_wallet_{new_address}"),
+                        InlineKeyboardButton(text="❌ Отмена", callback_data="wallet")
+                    ]
+                ])
+            )
+            await state.clear()
+            return
+
+    except Exception as e:
+        logger.error(f"❌ Error processing new wallet address: {e}")
+        await message.answer(
+            "❌ Произошла ошибка при обработке адреса. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад в кошелек", callback_data="wallet")]
+            ])
+        )
+        await state.clear()
+
+
+@router.callback_query(F.data.startswith("confirm_wallet_"))
+async def confirm_wallet_change(callback: CallbackQuery):
+    """Подтвердить смену кошелька"""
+    try:
+        # Извлекаем адрес из callback_data
+        new_address = callback.data.replace("confirm_wallet_", "")
+        user_id = callback.from_user.id
+
         # Получаем пользователя
         user = await User.get_by_telegram_id(user_id)
         if not user:
-            await message.answer("❌ Пользователь не найден!")
-            await state.clear()
+            await callback.message.edit_text("❌ Пользователь не найден!")
+            await callback.answer()
             return
 
         # Проверяем, не тот же ли это адрес
         if user.wallet_address.lower() == new_address.lower():
-            await message.answer(
+            await callback.message.edit_text(
                 "⚠️ Это тот же адрес, что уже привязан к вашему аккаунту!",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🔙 Назад в кошелек", callback_data="wallet")]
                 ])
             )
-            await state.clear()
+            await callback.answer()
             return
 
         # Сохраняем старый адрес для отображения
@@ -197,7 +302,7 @@ async def process_new_wallet_address(message: Message, state: FSMContext):
                 [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
             ])
 
-            await message.answer(
+            await callback.message.edit_text(
                 f"""✅ Кошелек успешно обновлен!
 
 📤 Старый адрес:
@@ -214,7 +319,7 @@ async def process_new_wallet_address(message: Message, state: FSMContext):
             logger.info(f"✅ User {user_id} updated wallet from {old_address[:8]}... to {new_address[:8]}...")
 
         else:
-            await message.answer(
+            await callback.message.edit_text(
                 "❌ Ошибка обновления кошелька в базе данных. Попробуйте позже.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🔙 Назад в кошелек", callback_data="wallet")]
@@ -222,18 +327,17 @@ async def process_new_wallet_address(message: Message, state: FSMContext):
             )
             logger.error(f"❌ Failed to update wallet for user {user_id}")
 
-        # Очищаем состояние FSM
-        await state.clear()
+        await callback.answer()
 
     except Exception as e:
-        logger.error(f"❌ Error processing new wallet address: {e}")
-        await message.answer(
-            "❌ Произошла ошибка при обработке адреса. Попробуйте позже.",
+        logger.error(f"❌ Error confirming wallet change: {e}")
+        await callback.message.edit_text(
+            "❌ Произошла ошибка при подтверждении. Попробуйте позже.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад в кошелек", callback_data="wallet")]
             ])
         )
-        await state.clear()
+        await callback.answer()
 
 
 @router.callback_query(F.data == "wallet_history")

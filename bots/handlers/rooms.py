@@ -483,14 +483,17 @@ async def join_room(callback: CallbackQuery):
         # Успешно присоединились
         creator = await User.get_by_telegram_id(room.creator_id)
         creator_name = creator.username if creator and creator.username else f"Player {room.creator_id}"
+        # Правильный расчет выигрыша
+        potential_win = room.stake + (room.stake * Decimal('0.7'))
 
         success_text = f"""✅ Присоединились к комнате!
 
-🎮 Дуэль с @{creator_name}
-💰 Ставка: {room.stake:,.0f} MORI
-🏆 Выигрыш: {room.stake * Decimal('1.7'):,.0f} MORI
+        🎮 Дуэль с @{creator_name}
+        💰 Ваша ставка: {room.stake:,.0f} MORI
+        🏆 При победе получите: {potential_win:,.0f} MORI
+        💡 (своя ставка + 70% от ставки оппонента)
 
-Готовы бросить монету?"""
+        Готовы бросить монету?"""
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎲 БРОСИТЬ МОНЕТУ", callback_data=f"flip_{duel.id}")]

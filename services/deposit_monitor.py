@@ -3,14 +3,17 @@
 """
 import asyncio
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Dict, Any, Set, Optional
 from datetime import datetime
 
 from database.models.user import User
 from database.models.transaction import Transaction, TransactionType
+from database.connection import async_session
 from services.solana_service import solana_service
 from config.settings import BOT_WALLET_ADDRESS, MORI_TOKEN_MINT
 from utils.logger import setup_logger
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from sqlalchemy import text
 
 logger = setup_logger(__name__)
 
@@ -19,6 +22,8 @@ class DepositMonitor:
     def __init__(self):
         self.monitoring = False
         self.last_processed_signature = None
+        self.processed_signatures: Set[str] = set()  # Кеш обработанных транзакций
+        self.check_interval = 30  # секунд
 
     async def start_monitoring(self):
         """Запустить мониторинг депозитов"""
@@ -48,8 +53,8 @@ class DepositMonitor:
                 # Проверяем новые транзакции на адрес бота
                 await self._check_new_transactions()
 
-                # Ждем 30 секунд перед следующей проверкой
-                await asyncio.sleep(30)
+                # Ждем следующую проверку
+                await asyncio.sleep(self.check_interval)
 
             except Exception as e:
                 logger.error(f"❌ Error in monitoring loop: {e}")
@@ -69,7 +74,7 @@ class DepositMonitor:
             # Получаем подписи транзакций
             signatures_response = await solana_service.client.get_signatures_for_address(
                 bot_pubkey,
-                limit=10,
+                limit=20,
                 before=self.last_processed_signature
             )
 
@@ -82,95 +87,74 @@ class DepositMonitor:
                 signature = str(sig_info.signature)
 
                 # Пропускаем уже обработанные
+                if signature in self.processed_signatures:
+                    continue
+
+                # Пропускаем если это последняя обработанная
                 if signature == self.last_processed_signature:
                     break
 
-                new_signatures.append(signature)
+                new_signatures.append((signature, sig_info))
 
             # Обрабатываем в обратном порядке (от старых к новым)
-            for signature in reversed(new_signatures):
-                await self._process_transaction(signature)
+            for signature, sig_info in reversed(new_signatures):
+                await self._process_transaction(signature, sig_info)
+                self.processed_signatures.add(signature)
 
             # Обновляем последнюю обработанную подпись
             if new_signatures:
-                self.last_processed_signature = new_signatures[0]
+                self.last_processed_signature = new_signatures[0][0]
+
+            # Очищаем кеш если он стал слишком большим
+            if len(self.processed_signatures) > 1000:
+                # Оставляем только последние 500
+                self.processed_signatures = set(list(self.processed_signatures)[-500:])
 
         except Exception as e:
             logger.error(f"❌ Error checking new transactions: {e}")
 
-    async def _process_transaction(self, signature: str):
+    async def _process_transaction(self, signature: str, sig_info):
         """Обработать транзакцию"""
         try:
-            # Получаем детали транзакции
-            tx_details = await solana_service.check_transaction(signature)
-
-            if not tx_details or not tx_details.get("confirmed"):
+            # Проверяем, что транзакция успешна
+            if sig_info.err:
+                logger.debug(f"⚠️ Skipping failed transaction {signature[:8]}...")
                 return
 
-            # Получаем полную информацию о транзакции
-            from solders.signature import Signature
-            sig = Signature.from_string(signature)
-
-            response = await solana_service.client.get_transaction(
-                sig,
-                commitment=solana_service.client._commitment
-            )
-
-            if not response.value:
+            # Проверяем, обработана ли уже эта транзакция в БД
+            if await self._is_transaction_processed(signature):
+                logger.debug(f"⚠️ Transaction {signature[:8]}... already processed in DB")
                 return
 
-            transaction = response.value.transaction
+            # Парсим транзакцию на предмет MORI депозитов
+            transfer_info = await solana_service.parse_token_transfer(signature)
 
-            # Анализируем транзакцию на предмет депозитов MORI токенов
-            deposit_info = await self._analyze_transaction_for_deposit(transaction, signature)
-
-            if deposit_info:
-                await self._process_deposit(deposit_info, signature)
+            if transfer_info and transfer_info.get("type") == "deposit":
+                # Проверяем, что это MORI токен
+                if transfer_info["token_mint"] == MORI_TOKEN_MINT:
+                    await self._process_deposit(transfer_info, signature, sig_info.block_time)
 
         except Exception as e:
             logger.error(f"❌ Error processing transaction {signature}: {e}")
 
-    async def _analyze_transaction_for_deposit(self, transaction, signature: str) -> Dict[str, Any]:
-        """Анализировать транзакцию на предмет депозита"""
-        try:
-            # Здесь должен быть анализ SPL token transfer'ов
-            # Это сложная логика парсинга транзакций Solana
-            # Пока возвращаем заглушку
-
-            # В реальной реализации нужно:
-            # 1. Найти SPL Token Transfer инструкции
-            # 2. Проверить, что токен = MORI_TOKEN_MINT
-            # 3. Проверить, что получатель = BOT_WALLET_ADDRESS
-            # 4. Извлечь отправителя и сумму
-
-            logger.info(f"🔍 Analyzing transaction {signature} for deposits...")
-
-            # Заглушка - в реальности здесь сложный парсинг
-            return None
-
-        except Exception as e:
-            logger.error(f"❌ Error analyzing transaction: {e}")
-            return None
-
-    async def _process_deposit(self, deposit_info: Dict[str, Any], tx_hash: str):
+    async def _process_deposit(self, deposit_info: Dict[str, Any], tx_hash: str, block_time: int):
         """Обработать депозит"""
         try:
-            sender_address = deposit_info["sender"]
-            amount = Decimal(str(deposit_info["amount"]))
+            amount = deposit_info["amount"]
+            account_address = deposit_info["account"]
 
-            logger.info(f"💰 Processing deposit: {amount} MORI from {sender_address}")
+            logger.info(f"💰 Processing deposit: {amount} MORI to account {account_address[:8]}...")
 
-            # Находим пользователя по адресу кошелька
-            user = await self._find_user_by_wallet(sender_address)
+            # Находим пользователя по Associated Token Account
+            user = await self._find_user_by_token_account(account_address)
 
             if not user:
-                logger.warning(f"⚠️ No user found for wallet {sender_address}")
+                logger.warning(f"⚠️ No user found for token account {account_address}")
                 return
 
-            # Проверяем, не обработан ли уже этот депозит
-            existing_tx = await self._check_existing_transaction(tx_hash)
-            if existing_tx:
-                logger.warning(f"⚠️ Transaction {tx_hash} already processed")
+            # Проверяем минимальную сумму депозита
+            if amount < Decimal("1"):
+                logger.warning(f"⚠️ Deposit amount too small: {amount} MORI")
                 return
 
             # Создаем транзакцию депозита
@@ -179,7 +163,7 @@ class DepositMonitor:
                 TransactionType.DEPOSIT,
                 amount,
                 tx_hash=tx_hash,
-                from_address=sender_address,
+                from_address=account_address,  # Это ATA, не wallet пользователя
                 to_address=BOT_WALLET_ADDRESS,
                 description=f"Депозит {amount} MORI"
             )
@@ -199,30 +183,59 @@ class DepositMonitor:
         except Exception as e:
             logger.error(f"❌ Error processing deposit: {e}")
 
-    async def _find_user_by_wallet(self, wallet_address: str) -> User:
-        """Найти пользователя по адресу кошелька"""
+    async def _find_user_by_token_account(self, token_account: str) -> Optional[User]:
+        """Найти пользователя по Associated Token Account"""
         try:
-            # В реальной реализации здесь был бы запрос к БД
-            # SELECT * FROM users WHERE wallet_address = %s
+            # Получаем информацию о владельце токен аккаунта
+            from solders.pubkey import Pubkey
+            account_pubkey = Pubkey.from_string(token_account)
 
-            # Пока заглушка
+            account_info = await solana_service.client.get_account_info(account_pubkey)
+            if not account_info.value or not account_info.value.data:
+                return None
+
+            # Парсим данные токен аккаунта чтобы получить owner
+            data = account_info.value.data
+            if len(data) < 32:
+                return None
+
+            # Owner находится в первых 32 байтах токен аккаунта
+            owner_bytes = data[:32]
+            owner_pubkey = Pubkey(owner_bytes)
+            owner_address = str(owner_pubkey)
+
+            # Ищем пользователя по wallet_address
+            async with async_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM users WHERE wallet_address = :wallet_address"),
+                    {"wallet_address": owner_address}
+                )
+                row = result.fetchone()
+                if row:
+                    user = User()
+                    for key, value in row._mapping.items():
+                        setattr(user, key, value)
+                    return user
+
             return None
 
         except Exception as e:
-            logger.error(f"❌ Error finding user by wallet {wallet_address}: {e}")
+            logger.error(f"❌ Error finding user by token account {token_account}: {e}")
             return None
 
-    async def _check_existing_transaction(self, tx_hash: str) -> bool:
-        """Проверить, существует ли транзакция с таким хешем"""
+    async def _is_transaction_processed(self, tx_hash: str) -> bool:
+        """Проверить, обработана ли транзакция"""
         try:
-            # В реальной реализации:
-            # SELECT COUNT(*) FROM transactions WHERE tx_hash = %s
-
-            # Пока заглушка
-            return False
+            async with async_session() as session:
+                result = await session.execute(
+                    text("SELECT COUNT(*) FROM transactions WHERE tx_hash = :tx_hash"),
+                    {"tx_hash": tx_hash}
+                )
+                count = result.scalar()
+                return count > 0
 
         except Exception as e:
-            logger.error(f"❌ Error checking existing transaction: {e}")
+            logger.error(f"❌ Error checking transaction {tx_hash}: {e}")
             return False
 
     async def _notify_user_about_deposit(self, user: User, amount: Decimal, tx_hash: str):
@@ -253,6 +266,91 @@ class DepositMonitor:
 
         except Exception as e:
             logger.error(f"❌ Error notifying user about deposit: {e}")
+
+    async def force_check_deposits(self, user_id: int = None) -> Dict[str, Any]:
+        """Принудительная проверка депозитов (для админки)"""
+        try:
+            if user_id:
+                # Проверяем депозиты конкретного пользователя
+                user = await User.get_by_telegram_id(user_id)
+                if not user:
+                    return {"error": "Пользователь не найден"}
+
+                # Получаем последние транзакции для его кошелька
+                recent_txs = await solana_service.get_recent_token_transactions(
+                    user.wallet_address,
+                    limit=5
+                )
+
+                processed_count = 0
+                for tx_info in recent_txs:
+                    if not await self._is_transaction_processed(tx_info["signature"]):
+                        await self._process_transaction(tx_info["signature"], type('obj', (object,), {
+                            'err': None,
+                            'block_time': tx_info.get("block_time")
+                        })())
+                        processed_count += 1
+
+                return {
+                    "success": True,
+                    "user_id": user_id,
+                    "processed": processed_count,
+                    "checked": len(recent_txs)
+                }
+            else:
+                # Общая принудительная проверка
+                await self._check_new_transactions()
+                return {"success": True, "message": "Force check completed"}
+
+        except Exception as e:
+            logger.error(f"❌ Error in force check deposits: {e}")
+            return {"error": str(e)}
+
+    async def get_monitoring_stats(self) -> Dict[str, Any]:
+        """Получить статистику мониторинга"""
+        try:
+            async with async_session() as session:
+                # Статистика депозитов за последние 24ч
+                result = await session.execute(text("""
+                    SELECT 
+                        COUNT(*) as count_24h,
+                        COALESCE(SUM(amount), 0) as sum_24h
+                    FROM transactions 
+                    WHERE type = 'deposit' 
+                    AND status = 'completed'
+                    AND created_at >= NOW() - INTERVAL '24 hours'
+                """))
+                stats_24h = result.fetchone()
+
+                # Общая статистика депозитов
+                result = await session.execute(text("""
+                    SELECT 
+                        COUNT(*) as total_count,
+                        COALESCE(SUM(amount), 0) as total_sum,
+                        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count
+                    FROM transactions 
+                    WHERE type = 'deposit'
+                """))
+                total_stats = result.fetchone()
+
+                return {
+                    "monitoring": self.monitoring,
+                    "last_signature": self.last_processed_signature[:8] + "..." if self.last_processed_signature else None,
+                    "processed_cache_size": len(self.processed_signatures),
+                    "deposits_24h": {
+                        "count": stats_24h.count_24h,
+                        "sum": float(stats_24h.sum_24h)
+                    },
+                    "deposits_total": {
+                        "count": total_stats.total_count,
+                        "sum": float(total_stats.total_sum),
+                        "pending": total_stats.pending_count
+                    }
+                }
+
+        except Exception as e:
+            logger.error(f"❌ Error getting monitoring stats: {e}")
+            return {"error": str(e)}
 
 
 # Глобальный экземпляр монитора

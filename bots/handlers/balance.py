@@ -401,18 +401,21 @@ async def confirm_withdrawal(callback: CallbackQuery):
             solana_service.mori_mint
         )
 
-        if tx_hash:
+        if tx_hash and len(tx_hash) > 10:  # Проверяем что получили реальный хеш
             # Успешно отправлено
             await transaction.complete_transaction(tx_hash)
 
             success_text = f"""✅ Вывод выполнен!
 
-💰 Отправлено: {net_amount:,.2f} MORI
-💳 Комиссия: {commission:,.2f} MORI
-🔗 TX: `{tx_hash[:16]}...`
-👛 На кошелек: {user.wallet_address[:8]}...{user.wallet_address[-4:]}
+        💰 Отправлено: {net_amount:,.2f} MORI
+        💳 Комиссия: {commission:,.2f} MORI
+        🔗 TX: `{tx_hash[:16]}...`
+        👛 На кошелек: {user.wallet_address[:8]}...{user.wallet_address[-4:]}
 
-💰 Новый баланс: {user.balance:,.2f} MORI"""
+        💰 Новый баланс: {user.balance:,.2f} MORI
+
+        ⏰ Транзакция обрабатывается сетью Solana
+        Токены поступят в течение 1-2 минут"""
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📊 Баланс", callback_data="balance")],
@@ -422,17 +425,23 @@ async def confirm_withdrawal(callback: CallbackQuery):
         else:
             # Ошибка отправки - возвращаем деньги
             await user.add_balance(amount)
-            await transaction.fail_transaction("Ошибка отправки транзакции")
+            await transaction.fail_transaction("Ошибка отправки в сеть Solana")
 
             success_text = f"""❌ Ошибка вывода!
 
-Средства возвращены на баланс.
-💰 Баланс: {user.balance:,.2f} MORI
+        Средства возвращены на баланс.
+        💰 Баланс: {user.balance:,.2f} MORI
 
-Попробуйте позже или обратитесь в поддержку."""
+        🔧 Возможные причины:
+        • Недостаточно SOL на кошельке бота для газа
+        • Проблемы с сетью Solana
+        • Неверный адрес получателя
+
+        Попробуйте позже или обратитесь в поддержку."""
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="withdraw")],
+                [InlineKeyboardButton(text="👛 Проверить кошелек", callback_data="wallet")],
                 [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
             ])
 

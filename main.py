@@ -19,7 +19,11 @@ async def main():
         # Создаем необходимые папки
         create_required_directories()
 
-        # Запускаем оба бота параллельно
+        # Запускаем мониторинг депозитов
+        from services.deposit_monitor import start_deposit_monitoring
+        await start_deposit_monitoring()
+
+        # Запускаем все компоненты параллельно
         await asyncio.gather(
             main_bot_polling(),
             user_bot_polling()
@@ -27,6 +31,9 @@ async def main():
 
     except KeyboardInterrupt:
         logger.info("🛑 Остановка ботов...")
+        # Останавливаем мониторинг
+        from services.deposit_monitor import stop_deposit_monitoring
+        await stop_deposit_monitoring()
     except Exception as e:
         logger.error(f"❌ Ошибка запуска: {e}")
 

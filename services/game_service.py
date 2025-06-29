@@ -157,10 +157,22 @@ class GameService:
             coin_result = CoinSide.HEADS if player_wins else CoinSide.TAILS
             winner_id = duel.player1_id if player_wins else duel.player2_id
 
-            # Рассчитываем выплаты
-            total_pot = duel.stake * 2  # Общий банк
-            commission = total_pot * Decimal(HOUSE_COMMISSION)  # Наша комиссия
-            winner_amount = total_pot - commission  # Выигрыш
+            # ИСПРАВЛЕННАЯ ЛОГИКА ВЫПЛАТ:
+            # Победитель получает свою ставку + 70% от ставки оппонента
+            if duel.is_house_duel:
+                # Дуэль с ботом: игрок vs бот
+                if player_wins:
+                    # Игрок выиграл: своя ставка + 70% от ставки бота (равной ставке игрока)
+                    winner_amount = duel.stake + (duel.stake * Decimal("0.7"))
+                    commission = duel.stake * Decimal("0.3")  # 30% от ставки бота
+                else:
+                    # Бот выиграл: игрок ничего не получает
+                    winner_amount = Decimal("0")
+                    commission = duel.stake * Decimal("0.3")  # 30% от ставки игрока
+            else:
+                # Дуэль между игроками: обе ставки равны
+                winner_amount = duel.stake + (duel.stake * Decimal("0.7"))  # своя + 70% от чужой
+                commission = duel.stake * Decimal("0.3")  # 30% от ставки проигравшего
 
             # Завершаем дуэль
             await duel.finish_duel(winner_id, coin_result, winner_amount, commission)
@@ -184,7 +196,7 @@ class GameService:
                     )
 
             # Отправляем выигрыш победителю
-            if winner_id > 0:  # Не бот
+            if winner_id > 0 and winner_amount > 0:  # Не бот и есть выигрыш
                 await self._send_winnings(winner_id, winner_amount, duel_id)
 
             result = {
@@ -198,7 +210,7 @@ class GameService:
                 "house_account": duel.house_account_name
             }
 
-            logger.info(f"✅ Coin flipped for duel {duel_id}: {coin_result.value}, winner: {winner_id}")
+            logger.info(f"✅ Coin flipped for duel {duel_id}: {coin_result.value}, winner: {winner_id}, amount: {winner_amount}")
             return result
 
         except Exception as e:
@@ -246,9 +258,28 @@ class GameService:
     async def get_active_house_duels(self) -> List[Dict]:
         """Получить активные дуэли с ботами для админки"""
         try:
-            # В реальной реализации здесь был бы запрос к БД
-            # Пока возвращаем пустой список
-            return []
+            # Получаем активные house дуэли из БД
+            from database.connection import async_session
+            from sqlalchemy import text
+
+            async with async_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT * FROM duels 
+                        WHERE status = 'active' AND is_house_duel = true 
+                        ORDER BY created_at DESC
+                    """)
+                )
+
+                duels = []
+                for row in result.fetchall():
+                    duel = Duel()
+                    for key, value in row._mapping.items():
+                        setattr(duel, key, value)
+                    duels.append(duel)
+
+                return duels
+
         except Exception as e:
             logger.error(f"❌ Error getting active house duels: {e}")
             return []
