@@ -18,13 +18,15 @@ logger = setup_logger(__name__)
 @router.message(Command("stats"))
 async def show_user_stats(update):
     """Показать статистику пользователя"""
-    # Определяем тип update (Message или CallbackQuery)
-    if hasattr(update, 'from_user'):
-        user_id = update.from_user.id
-        edit_func = update.answer
-    else:
+    # Определяем тип update и получаем user_id
+    if isinstance(update, CallbackQuery):
         user_id = update.from_user.id
         edit_func = update.message.edit_text
+        answer_func = update.answer
+    else:  # Message
+        user_id = update.from_user.id
+        edit_func = update.answer
+        answer_func = lambda: None  # Для Message не нужно answer()
 
     user = await User.get_by_telegram_id(user_id)
 
@@ -37,8 +39,7 @@ async def show_user_stats(update):
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
             ])
         )
-        if hasattr(update, 'answer'):
-            await update.answer()
+        await answer_func()
         return
 
     # Получаем дополнительную статистику
@@ -103,9 +104,7 @@ async def show_user_stats(update):
     ])
 
     await edit_func(stats_text, reply_markup=keyboard)
-
-    if hasattr(update, 'answer'):
-        await update.answer()
+    await answer_func()
 
 
 @router.callback_query(F.data == "leaderboard")
@@ -158,10 +157,12 @@ async def show_leaderboard(callback: CallbackQuery):
 async def show_rules(update):
     """Показать правила игры"""
     # Определяем тип update
-    if hasattr(update, 'from_user'):
-        edit_func = update.answer
-    else:
+    if isinstance(update, CallbackQuery):
         edit_func = update.message.edit_text
+        answer_func = update.answer
+    else:  # Message
+        edit_func = update.answer
+        answer_func = lambda: None
 
     rules_text = """ℹ️ Правила MORI Duels
 
@@ -208,9 +209,7 @@ async def show_rules(update):
     ])
 
     await edit_func(rules_text, reply_markup=keyboard)
-
-    if hasattr(update, 'answer'):
-        await update.answer()
+    await answer_func()
 
 
 @router.message(Command("help"))

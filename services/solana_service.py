@@ -56,14 +56,19 @@ class SolanaService:
                 # Парсим приватный ключ (предполагаем формат base58)
                 import base58
                 private_key_bytes = base58.b58decode(BOT_PRIVATE_KEY)
-                # Solana использует 64-байтные ключи, но Keypair.from_bytes ожидает первые 32 байта
-                if len(private_key_bytes) == 64:
-                    private_key_bytes = private_key_bytes[:32]
-                elif len(private_key_bytes) != 32:
+
+                # Solana Keypair.from_bytes ожидает полный secret key (64 байта)
+                # или seed (32 байта), но мы должны использовать правильный метод
+                if len(private_key_bytes) == 32:
+                    # Это seed, используем from_seed
+                    self.bot_keypair = Keypair.from_seed(private_key_bytes)
+                elif len(private_key_bytes) == 64:
+                    # Это полный secret key, используем from_bytes
+                    self.bot_keypair = Keypair.from_bytes(private_key_bytes)
+                else:
                     logger.error(f"❌ Invalid private key length: {len(private_key_bytes)}, expected 32 or 64 bytes")
                     return
 
-                self.bot_keypair = Keypair.from_bytes(private_key_bytes)
                 self.bot_pubkey = self.bot_keypair.pubkey()
                 logger.info(f"✅ Bot wallet initialized: {str(self.bot_pubkey)[:8]}...")
 
@@ -73,6 +78,8 @@ class SolanaService:
 
         except Exception as e:
             logger.error(f"❌ Error initializing bot wallet: {e}")
+            logger.error(f"❌ Private key format should be base58 encoded")
+            logger.error(f"❌ Check your BOT_PRIVATE_KEY in .env file")
 
     async def get_sol_balance(self, address: str) -> Optional[Decimal]:
         """Получить баланс SOL"""
@@ -351,6 +358,8 @@ class SolanaService:
     async def monitor_address_for_deposits(self, address: str, callback_func) -> None:
         """Мониторинг адреса для депозитов"""
         try:
+            from solders.signature import Signature
+
             pubkey = Pubkey.from_string(address)
 
             # Получаем текущую подпись для отслеживания новых транзакций
@@ -360,31 +369,42 @@ class SolanaService:
                 commitment=Confirmed
             )
 
-            last_signature = None
+            last_signature_str = None
             if signatures_response.value:
-                last_signature = signatures_response.value[0].signature
+                last_signature_str = str(signatures_response.value[0].signature)
 
             logger.info(f"🔍 Started monitoring {address[:8]}... for deposits")
 
             while True:
                 await asyncio.sleep(30)  # Проверяем каждые 30 секунд
 
+                # Конвертируем строку в объект Signature если есть
+                before_signature = None
+                if last_signature_str:
+                    try:
+                        before_signature = Signature.from_string(last_signature_str)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Invalid signature format: {e}")
+                        last_signature_str = None
+
                 # Получаем новые подписи
                 new_signatures_response = await self.client.get_signatures_for_address(
                     pubkey,
-                    before=last_signature,
+                    before=before_signature,  # Передаем объект Signature
                     commitment=Confirmed
                 )
 
                 if new_signatures_response.value:
                     for sig_info in reversed(new_signatures_response.value):
-                        # Парсим транзакцию на предмет токен трансферов
-                        transfer_info = await self.parse_token_transfer(str(sig_info.signature))
-                        if transfer_info:
-                            await callback_func(address, str(sig_info.signature), transfer_info)
+                        # Проверяем, что транзакция успешна
+                        if not sig_info.err:
+                            # Парсим транзакцию на предмет токен трансферов
+                            transfer_info = await self.parse_token_transfer(str(sig_info.signature))
+                            if transfer_info:
+                                await callback_func(address, str(sig_info.signature), transfer_info)
 
                     # Обновляем последнюю подпись
-                    last_signature = new_signatures_response.value[0].signature
+                    last_signature_str = str(new_signatures_response.value[0].signature)
 
         except Exception as e:
             logger.error(f"❌ Error monitoring address {address}: {e}")
@@ -403,13 +423,15 @@ class SolanaService:
             transactions = []
             if signatures_response.value:
                 for sig_info in signatures_response.value:
-                    transfer_info = await self.parse_token_transfer(str(sig_info.signature))
-                    if transfer_info:
-                        transactions.append({
-                            "signature": str(sig_info.signature),
-                            "block_time": sig_info.block_time,
-                            **transfer_info
-                        })
+                    # Пропускаем неудачные транзакции
+                    if not sig_info.err:
+                        transfer_info = await self.parse_token_transfer(str(sig_info.signature))
+                        if transfer_info:
+                            transactions.append({
+                                "signature": str(sig_info.signature),
+                                "block_time": sig_info.block_time,
+                                **transfer_info
+                            })
 
             return transactions
 

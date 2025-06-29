@@ -6,6 +6,10 @@ from decimal import Decimal
 from typing import Dict, Any, Set, Optional
 from datetime import datetime
 
+from solders.pubkey import Pubkey
+from solders.signature import Signature
+from solana.rpc.commitment import Confirmed
+
 from database.models.user import User
 from database.models.transaction import Transaction, TransactionType
 from database.connection import async_session
@@ -69,13 +73,24 @@ class DepositMonitor:
 
             # Получаем последние транзакции на адрес бота
             from solders.pubkey import Pubkey
+            from solders.signature import Signature
+
             bot_pubkey = Pubkey.from_string(BOT_WALLET_ADDRESS)
 
             # Получаем подписи транзакций
+            before_signature = None
+            if self.last_processed_signature:
+                try:
+                    before_signature = Signature.from_string(self.last_processed_signature)
+                except Exception as e:
+                    logger.warning(f"⚠️ Invalid last processed signature: {e}")
+                    self.last_processed_signature = None
+
             signatures_response = await solana_service.client.get_signatures_for_address(
                 bot_pubkey,
                 limit=20,
-                before=self.last_processed_signature
+                before=before_signature,  # Теперь передаем объект Signature, а не строку
+                commitment=Confirmed
             )
 
             if not signatures_response.value:
@@ -84,22 +99,22 @@ class DepositMonitor:
             # Обрабатываем новые транзакции
             new_signatures = []
             for sig_info in signatures_response.value:
-                signature = str(sig_info.signature)
+                signature_str = str(sig_info.signature)
 
                 # Пропускаем уже обработанные
-                if signature in self.processed_signatures:
+                if signature_str in self.processed_signatures:
                     continue
 
                 # Пропускаем если это последняя обработанная
-                if signature == self.last_processed_signature:
+                if signature_str == self.last_processed_signature:
                     break
 
-                new_signatures.append((signature, sig_info))
+                new_signatures.append((signature_str, sig_info))
 
             # Обрабатываем в обратном порядке (от старых к новым)
-            for signature, sig_info in reversed(new_signatures):
-                await self._process_transaction(signature, sig_info)
-                self.processed_signatures.add(signature)
+            for signature_str, sig_info in reversed(new_signatures):
+                await self._process_transaction(signature_str, sig_info)
+                self.processed_signatures.add(signature_str)
 
             # Обновляем последнюю обработанную подпись
             if new_signatures:
@@ -112,6 +127,8 @@ class DepositMonitor:
 
         except Exception as e:
             logger.error(f"❌ Error checking new transactions: {e}")
+            # Сбрасываем last_processed_signature в случае ошибки
+            self.last_processed_signature = None
 
     async def _process_transaction(self, signature: str, sig_info):
         """Обработать транзакцию"""
@@ -136,6 +153,8 @@ class DepositMonitor:
 
         except Exception as e:
             logger.error(f"❌ Error processing transaction {signature}: {e}")
+            # Не прерываем мониторинг из-за одной ошибки
+            pass
 
     async def _process_deposit(self, deposit_info: Dict[str, Any], tx_hash: str, block_time: int):
         """Обработать депозит"""
