@@ -284,7 +284,8 @@ class SolanaService:
 
             response = await self.client.get_transaction(
                 signature,
-                commitment=Confirmed
+                commitment=Confirmed,
+                max_supported_transaction_version=0  # Поддержка версии 0 транзакций
             )
 
             if response.value:
@@ -305,11 +306,14 @@ class SolanaService:
         """Парсинг SPL token transfer из транзакции"""
         try:
             from solders.signature import Signature
+
             signature = Signature.from_string(tx_hash)
 
+            # Добавляем поддержку новых версий транзакций
             response = await self.client.get_transaction(
                 signature,
-                commitment=Confirmed
+                commitment=Confirmed,
+                max_supported_transaction_version=0  # Поддержка версии 0 транзакций
             )
 
             if not response.value or not response.value.transaction.meta:
@@ -339,7 +343,8 @@ class SolanaService:
                         amount = (post_amount - pre_amount) / Decimal(10 ** post_balance.ui_token_amount.decimals)
 
                         # Получаем адрес владельца аккаунта
-                        account_info = response.value.transaction.transaction.message.account_keys[pre_balance.account_index]
+                        account_info = response.value.transaction.transaction.message.account_keys[
+                            pre_balance.account_index]
 
                         return {
                             "type": "deposit",

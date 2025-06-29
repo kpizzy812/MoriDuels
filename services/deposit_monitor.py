@@ -261,27 +261,9 @@ class DepositMonitor:
         """Уведомить пользователя о депозите"""
         try:
             from bots.main_bot import bot
+            from utils.notification_utils import safe_notify_user_about_deposit
 
-            message = f"""✅ Депозит зачислен!
-
-💰 Сумма: {amount:,.2f} MORI
-🔗 TX: {tx_hash[:12]}...
-💳 Новый баланс: {user.balance:,.2f} MORI
-
-Можете начинать играть! 🎮"""
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎮 Играть", callback_data="quick_game")],
-                [InlineKeyboardButton(text="📊 Баланс", callback_data="balance")]
-            ])
-
-            await bot.send_message(
-                user.telegram_id,
-                message,
-                reply_markup=keyboard
-            )
-
-            logger.info(f"📱 Notified user {user.telegram_id} about deposit")
+            await safe_notify_user_about_deposit(bot, user, amount, tx_hash)
 
         except Exception as e:
             logger.error(f"❌ Error notifying user about deposit: {e}")

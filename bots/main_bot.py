@@ -9,14 +9,17 @@ from config.settings import MAIN_BOT_TOKEN
 from database.connection import init_db
 from utils.logger import setup_logger
 
+# Импорт middleware
+from bots.middlewares.error_handler import ErrorHandlerMiddleware, UserBlockedMiddleware
+
 # Импорт handlers
 from bots.handlers.start import router as start_router
 from bots.handlers.wallet import router as wallet_router
 from bots.handlers.balance import router as balance_router
-from bots.handlers.game import router as game_router  # ← ДОБАВЛЕНО
+from bots.handlers.game import router as game_router
 from bots.handlers.rooms import router as rooms_router
 from bots.handlers.admin import router as admin_router
-from bots.handlers.stats import router as stats_router  # ← ДОБАВЛЕНО
+from bots.handlers.stats import router as stats_router
 
 logger = setup_logger(__name__)
 
@@ -33,13 +36,19 @@ async def setup_bot():
     # Инициализируем базу данных
     await init_db()
 
+    # Регистрируем middleware (порядок важен!)
+    dp.message.middleware(UserBlockedMiddleware())
+    dp.callback_query.middleware(UserBlockedMiddleware())
+    dp.message.middleware(ErrorHandlerMiddleware())
+    dp.callback_query.middleware(ErrorHandlerMiddleware())
+
     # Регистрируем роутеры
     dp.include_router(start_router)
     dp.include_router(wallet_router)
     dp.include_router(balance_router)
-    dp.include_router(game_router)  # ← ДОБАВЛЕНО
+    dp.include_router(game_router)
     dp.include_router(rooms_router)
-    dp.include_router(stats_router)  # ← ДОБАВЛЕНО
+    dp.include_router(stats_router)
     dp.include_router(admin_router)
 
     logger.info("✅ Main bot setup complete")

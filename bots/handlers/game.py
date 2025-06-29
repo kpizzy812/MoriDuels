@@ -312,41 +312,9 @@ async def notify_opponent(opponent_id: int, result: dict, current_user_id: int):
     """Уведомить оппонента о результате"""
     try:
         from bots.main_bot import bot
+        from utils.notification_utils import safe_notify_opponent
 
-        opponent_won = (result["winner_id"] == opponent_id)
-        coin_emoji = "🟡" if result["coin_result"] == "heads" else "⚪"
-        coin_text = "ОРЕЛ" if result["coin_result"] == "heads" else "РЕШКА"
-
-        current_user = await User.get_by_telegram_id(current_user_id)
-        current_user_name = f"@{current_user.username}" if current_user and current_user.username else f"Player {current_user_id}"
-
-        if opponent_won:
-            message_text = f"""🎉 ПОБЕДА! 🎉
-
-Дуэль с {current_user_name}:
-{coin_emoji} Выпал: {coin_text}
-🏆 Вы выиграли: {result['winner_amount']:,.2f} MORI
-
-💰 Средства отправлены на ваш кошелек!"""
-        else:
-            message_text = f"""💔 Поражение
-
-Дуэль с {current_user_name}:
-{coin_emoji} Выпал: {coin_text}
-😔 Вы проиграли свою ставку"""
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎮 Играть еще", callback_data="quick_game")],
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
-        ])
-
-        await bot.send_message(
-            opponent_id,
-            message_text,
-            reply_markup=keyboard
-        )
-
-        logger.info(f"✅ Notified opponent {opponent_id} about duel result")
+        await safe_notify_opponent(bot, opponent_id, result, current_user_id)
 
     except Exception as e:
         logger.error(f"❌ Error notifying opponent {opponent_id}: {e}")
