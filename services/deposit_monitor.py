@@ -316,8 +316,8 @@ class DepositMonitor:
                         COUNT(*) as count_24h,
                         COALESCE(SUM(amount), 0) as sum_24h
                     FROM transactions 
-                    WHERE type = 'deposit' 
-                    AND status = 'completed'
+                    WHERE type = 'deposit'::transactiontype 
+                    AND status = 'completed'::transactionstatus
                     AND created_at >= NOW() - INTERVAL '24 hours'
                 """))
                 stats_24h = result.fetchone()
@@ -327,15 +327,16 @@ class DepositMonitor:
                     SELECT 
                         COUNT(*) as total_count,
                         COALESCE(SUM(amount), 0) as total_sum,
-                        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count
+                        COUNT(CASE WHEN status = 'pending'::transactionstatus THEN 1 END) as pending_count
                     FROM transactions 
-                    WHERE type = 'deposit'
+                    WHERE type = 'deposit'::transactiontype
                 """))
                 total_stats = result.fetchone()
 
                 return {
                     "monitoring": self.monitoring,
-                    "last_signature": self.last_processed_signature[:8] + "..." if self.last_processed_signature else None,
+                    "last_signature": self.last_processed_signature[
+                                      :8] + "..." if self.last_processed_signature else None,
                     "processed_cache_size": len(self.processed_signatures),
                     "deposits_24h": {
                         "count": stats_24h.count_24h,

@@ -85,25 +85,30 @@ async def wallet_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data == "copy_wallet")
 async def copy_wallet_address(callback: CallbackQuery):
-    """Копировать адрес кошелька"""
+    """Показать адрес для копирования"""
     user_id = callback.from_user.id
 
     try:
         user = await User.get_by_telegram_id(user_id)
 
         if user:
-            # Показываем адрес для копирования
-            await callback.answer(
-                f"📋 Адрес скопирован:\n{user.wallet_address}",
-                show_alert=True
+            # Отправляем адрес в удобном для копирования формате
+            await callback.message.answer(
+                f"📋 Ваш адрес кошелька:\n\n`{user.wallet_address}`\n\n"
+                "👆 Нажмите на адрес выше, чтобы выделить и скопировать",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад в кошелек", callback_data="wallet")]
+                ])
             )
-            logger.info(f"✅ User {user_id} copied wallet address")
+            await callback.answer("📋 Адрес отправлен отдельным сообщением")
+            logger.info(f"✅ User {user_id} requested wallet address for copying")
         else:
             await callback.answer("❌ Ошибка: пользователь не найден", show_alert=True)
 
     except Exception as e:
-        logger.error(f"❌ Error copying wallet address: {e}")
-        await callback.answer("❌ Ошибка копирования адреса", show_alert=True)
+        logger.error(f"❌ Error showing wallet address: {e}")
+        await callback.answer("❌ Ошибка получения адреса", show_alert=True)
 
 
 @router.callback_query(F.data == "change_wallet")

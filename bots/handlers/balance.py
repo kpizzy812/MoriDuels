@@ -127,11 +127,16 @@ async def deposit_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data == "copy_deposit_address")
 async def copy_deposit_address(callback: CallbackQuery):
-    """Копировать адрес для депозита"""
-    await callback.answer(
-        f"📋 Адрес скопирован: {BOT_WALLET_ADDRESS}",
-        show_alert=True
+    """Показать адрес для депозита"""
+    await callback.message.answer(
+        f"📋 Адрес для пополнения:\n\n`{BOT_WALLET_ADDRESS}`\n\n"
+        "👆 Нажмите на адрес выше, чтобы выделить и скопировать",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад к пополнению", callback_data="deposit")]
+        ])
     )
+    await callback.answer("📋 Адрес отправлен отдельным сообщением")
 
 
 @router.callback_query(F.data == "deposit_help")

@@ -7,19 +7,24 @@ from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from database.models.user import User
 from database.models.duel import Duel, DuelStatus
 from database.models.transaction import Transaction, TransactionType, TransactionStatus
 from database.connection import async_session
 from services.game_service import game_service
-from config.settings import ADMIN_IDS
+from config.settings import ADMIN_IDS, BOT_WALLET_ADDRESS, MORI_TOKEN_MINT
 from utils.logger import setup_logger
 from sqlalchemy import text
+from typing import Optional
 
 router = Router()
 logger = setup_logger(__name__)
 
+class AdminStates(StatesGroup):
+    waiting_for_user_search = State()
 
 def is_admin(user_id: int) -> bool:
     """Проверка, является ли пользователь админом"""
@@ -354,14 +359,14 @@ async def get_admin_stats() -> dict:
             result = await session.execute(text("""
                 SELECT 
                     (SELECT COUNT(*) FROM users) as users_count,
-                    (SELECT COUNT(*) FROM duels WHERE status = 'finished') as total_games,
-                    (SELECT COALESCE(SUM(stake * 2), 0) FROM duels WHERE status = 'finished') as total_volume,
-                    (SELECT COALESCE(SUM(house_commission), 0) FROM duels WHERE status = 'finished') as total_commission,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished'::duelstatus) as total_games,
+                    (SELECT COALESCE(SUM(stake * 2), 0) FROM duels WHERE status = 'finished'::duelstatus) as total_volume,
+                    (SELECT COALESCE(SUM(house_commission), 0) FROM duels WHERE status = 'finished'::duelstatus) as total_commission,
                     (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '24 hours') as new_users_24h,
-                    (SELECT COUNT(*) FROM duels WHERE status = 'finished' AND finished_at >= NOW() - INTERVAL '24 hours') as games_24h,
-                    (SELECT COALESCE(SUM(stake * 2), 0) FROM duels WHERE status = 'finished' AND finished_at >= NOW() - INTERVAL '24 hours') as volume_24h,
-                    (SELECT COUNT(*) FROM duels WHERE status = 'active' AND is_house_duel = true) as active_house_duels,
-                    (SELECT COUNT(*) FROM duels WHERE status = 'finished' AND is_house_duel = true) as total_house_games
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished'::duelstatus AND finished_at >= NOW() - INTERVAL '24 hours') as games_24h,
+                    (SELECT COALESCE(SUM(stake * 2), 0) FROM duels WHERE status = 'finished'::duelstatus AND finished_at >= NOW() - INTERVAL '24 hours') as volume_24h,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'active'::duelstatus AND is_house_duel = true) as active_house_duels,
+                    (SELECT COUNT(*) FROM duels WHERE status = 'finished'::duelstatus AND is_house_duel = true) as total_house_games
             """))
 
             stats = result.fetchone()
@@ -450,7 +455,7 @@ async def get_pending_transactions_count() -> int:
     async with async_session() as session:
         try:
             result = await session.execute(text("""
-                SELECT COUNT(*) FROM transactions WHERE status = 'pending'
+                SELECT COUNT(*) FROM transactions WHERE status = 'pending'::transactionstatus
             """))
             return result.scalar()
         except Exception as e:
@@ -667,29 +672,337 @@ async def admin_solana_stats(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "admin_search_user")
-async def admin_search_user(callback: CallbackQuery):
+async def admin_search_user(callback: CallbackQuery, state: FSMContext):
     """Поиск пользователя"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Нет доступа!", show_alert=True)
         return
 
-    # TODO: Реализовать через FSM состояния
     await callback.message.edit_text(
         """🔍 Поиск пользователя
 
-В разработке... 
-Пока используйте основную статистику.
+Введите один из вариантов:
+- Telegram ID (например: 123456789)
+- Username (например: @username или username)
+- Адрес кошелька Solana
 
-Планируемые функции:
-• Поиск по Telegram ID
-• Поиск по username  
-• Поиск по адресу кошелька
-• Детальная информация о пользователе""",
+🔎 Отправьте поисковый запрос:""",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_users")]
         ])
     )
+
+    await state.set_state(AdminStates.waiting_for_user_search)
     await callback.answer()
+
+
+@router.message(AdminStates.waiting_for_user_search)
+async def process_user_search(message: Message, state: FSMContext):
+    """Обработка поискового запроса пользователя"""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    search_query = message.text.strip()
+
+    try:
+        # Определяем тип поиска и ищем пользователя
+        user = await search_user_by_query(search_query)
+
+        if not user:
+            await message.answer(
+                f"❌ Пользователь не найден по запросу: `{search_query}`",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔍 Новый поиск", callback_data="admin_search_user")],
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
+                ]),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+
+        # Показываем детальную информацию о пользователе
+        user_info = await get_detailed_user_info(user)
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Транзакции", callback_data=f"admin_user_txs_{user.id}"),
+                InlineKeyboardButton(text="🎮 Дуэли", callback_data=f"admin_user_duels_{user.id}")
+            ],
+            [
+                InlineKeyboardButton(text="💰 Изменить баланс", callback_data=f"admin_change_balance_{user.id}"),
+                InlineKeyboardButton(text="🔒 Заблокировать", callback_data=f"admin_block_user_{user.id}")
+            ],
+            [
+                InlineKeyboardButton(text="🔍 Новый поиск", callback_data="admin_search_user"),
+                InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")
+            ]
+        ])
+
+        await message.answer(user_info, reply_markup=keyboard, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"❌ Error searching user: {e}")
+        await message.answer(
+            "❌ Ошибка поиска пользователя",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
+            ])
+        )
+
+    await state.clear()
+
+
+async def search_user_by_query(query: str) -> Optional[User]:
+    """Поиск пользователя по различным критериям"""
+    try:
+        # Убираем @ из username если есть
+        if query.startswith('@'):
+            query = query[1:]
+
+        # Проверяем, является ли запрос числом (Telegram ID)
+        if query.isdigit():
+            telegram_id = int(query)
+            return await User.get_by_telegram_id(telegram_id)
+
+        # Проверяем, является ли запрос адресом кошелька (32-44 символа)
+        if 32 <= len(query) <= 44:
+            async with async_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM users WHERE wallet_address = :wallet"),
+                    {"wallet": query}
+                )
+                row = result.fetchone()
+                if row:
+                    user = User()
+                    for key, value in row._mapping.items():
+                        setattr(user, key, value)
+                    return user
+
+        # Поиск по username
+        async with async_session() as session:
+            result = await session.execute(
+                text("SELECT * FROM users WHERE LOWER(username) = LOWER(:username)"),
+                {"username": query}
+            )
+            row = result.fetchone()
+            if row:
+                user = User()
+                for key, value in row._mapping.items():
+                    setattr(user, key, value)
+                return user
+
+        return None
+
+    except Exception as e:
+        logger.error(f"❌ Error in search_user_by_query: {e}")
+        return None
+
+
+async def get_detailed_user_info(user: User) -> str:
+    """Получить детальную информацию о пользователе"""
+    try:
+        # Получаем дополнительную статистику
+        async with async_session() as session:
+            # Статистика транзакций
+            tx_result = await session.execute(text("""
+                SELECT 
+                    COUNT(*) as total_txs,
+                    COUNT(CASE WHEN type = 'deposit'::transactiontype THEN 1 END) as deposits,
+                    COUNT(CASE WHEN type = 'withdrawal'::transactiontype THEN 1 END) as withdrawals,
+                    COUNT(CASE WHEN status = 'pending'::transactionstatus THEN 1 END) as pending_txs,
+                    COALESCE(SUM(CASE WHEN type = 'deposit'::transactiontype AND status = 'completed'::transactionstatus THEN amount ELSE 0 END), 0) as total_deposited,
+                    COALESCE(SUM(CASE WHEN type = 'withdrawal'::transactiontype AND status = 'completed'::transactionstatus THEN amount ELSE 0 END), 0) as total_withdrawn
+                FROM transactions 
+                WHERE user_id = :user_id
+            """), {"user_id": user.id})
+            tx_stats = tx_result.fetchone()
+
+            # Статистика дуэлей
+            duels_result = await session.execute(text("""
+                SELECT 
+                    COUNT(*) as total_duels,
+                    COUNT(CASE WHEN winner_id = :telegram_id THEN 1 END) as won_duels,
+                    COUNT(CASE WHEN is_house_duel = true THEN 1 END) as house_duels,
+                    COALESCE(AVG(stake), 0) as avg_stake,
+                    COALESCE(MAX(stake), 0) as max_stake
+                FROM duels 
+                WHERE (player1_id = :telegram_id OR player2_id = :telegram_id) 
+                AND status = 'finished'::duelstatus
+            """), {"telegram_id": user.telegram_id})
+            duels_stats = duels_result.fetchone()
+
+        # Последняя активность
+        last_activity = "Неизвестно"
+        if tx_stats.total_txs > 0:
+            last_tx_result = await session.execute(text("""
+                SELECT created_at FROM transactions 
+                WHERE user_id = :user_id 
+                ORDER BY created_at DESC LIMIT 1
+            """), {"user_id": user.id})
+            last_tx = last_tx_result.fetchone()
+            if last_tx:
+                last_activity = last_tx.created_at.strftime('%d.%m.%Y %H:%M')
+
+        # Формируем информацию
+        status_emoji = "🟢" if user.is_active else "🔴"
+        username_display = f"@{user.username}" if user.username else "Не установлен"
+
+        info = f"""👤 Детальная информация о пользователе
+
+{status_emoji} **Основные данные:**
+- ID: `{user.telegram_id}`
+- Username: {username_display}
+- Статус: {"Активен" if user.is_active else "Заблокирован"}
+- Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}
+- Последняя активность: {last_activity}
+
+💰 **Финансы:**
+- Баланс: {user.balance:,.2f} MORI
+- Всего внесено: {float(tx_stats.total_deposited):,.2f} MORI
+- Всего выведено: {float(tx_stats.total_withdrawn):,.2f} MORI
+- Прибыль: {user.get_profit():+,.2f} MORI
+
+📊 **Транзакции:**
+- Всего: {tx_stats.total_txs}
+- Депозиты: {tx_stats.deposits}
+- Выводы: {tx_stats.withdrawals}
+- Ожидающих: {tx_stats.pending_txs}
+
+🎮 **Игровая статистика:**
+- Всего игр: {user.total_games}
+- Побед: {user.wins} ({user.get_win_rate():.1f}%)
+- Игр с ботами: {duels_stats.house_duels}
+- Средняя ставка: {float(duels_stats.avg_stake):,.0f} MORI
+- Максимальная ставка: {float(duels_stats.max_stake):,.0f} MORI
+
+👛 **Кошелек:**
+- Адрес: `{user.wallet_address[:16]}...{user.wallet_address[-8:]}`
+- Обновлен: {user.wallet_updated_at.strftime('%d.%m.%Y %H:%M')}"""
+
+        return info
+
+    except Exception as e:
+        logger.error(f"❌ Error getting detailed user info: {e}")
+        return f"❌ Ошибка получения информации о пользователе: {e}"
+
+
+@router.callback_query(F.data.startswith("admin_user_txs_"))
+async def show_user_transactions(callback: CallbackQuery):
+    """Показать транзакции пользователя"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[3])
+
+    try:
+        async with async_session() as session:
+            result = await session.execute(text("""
+                SELECT t.*, u.username, u.telegram_id
+                FROM transactions t
+                JOIN users u ON t.user_id = u.id
+                WHERE t.user_id = :user_id
+                ORDER BY t.created_at DESC
+                LIMIT 20
+            """), {"user_id": user_id})
+
+            transactions = [dict(row._mapping) for row in result.fetchall()]
+
+        if not transactions:
+            tx_text = "📋 Транзакции пользователя\n\n❌ Транзакции не найдены"
+        else:
+            user_info = transactions[0]
+            username = f"@{user_info['username']}" if user_info['username'] else f"User {user_info['telegram_id']}"
+
+            tx_text = f"📋 Транзакции пользователя {username}\n\n"
+
+            for tx in transactions:
+                date_str = tx['created_at'].strftime('%d.%m %H:%M')
+                status_emoji = {"completed": "✅", "pending": "⏳", "failed": "❌", "cancelled": "🚫"}.get(tx['status'],
+                                                                                                       "❓")
+                type_emoji = {"deposit": "💰", "withdrawal": "💸", "duel_stake": "🎮", "duel_win": "🏆",
+                              "commission": "💼"}.get(tx['type'], "❓")
+
+                tx_text += f"{status_emoji} {type_emoji} {tx['type'].upper()}\n"
+                tx_text += f"   💰 {tx['amount']:+,.2f} MORI\n"
+                tx_text += f"   📅 {date_str}\n"
+                if tx['tx_hash']:
+                    tx_text += f"   🔗 {tx['tx_hash'][:12]}...\n"
+                tx_text += "\n"
+
+        await callback.message.edit_text(
+            tx_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад к пользователю", callback_data="admin_search_user")]
+            ])
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Error showing user transactions: {e}")
+        await callback.answer("❌ Ошибка загрузки транзакций", show_alert=True)
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_user_duels_"))
+async def show_user_duels(callback: CallbackQuery):
+    """Показать дуэли пользователя"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[3])
+
+    try:
+        async with async_session() as session:
+            result = await session.execute(text("""
+                SELECT d.*, u.telegram_id, u.username
+                FROM duels d
+                JOIN users u ON u.id = :user_id
+                WHERE (d.player1_id = u.telegram_id OR d.player2_id = u.telegram_id)
+                AND d.status = 'finished'::duelstatus
+                ORDER BY d.finished_at DESC
+                LIMIT 15
+            """), {"user_id": user_id})
+
+            duels = [dict(row._mapping) for row in result.fetchall()]
+
+        if not duels:
+            duels_text = "🎮 Дуэли пользователя\n\n❌ Дуэли не найдены"
+        else:
+            user_info = duels[0]
+            username = f"@{user_info['username']}" if user_info['username'] else f"User {user_info['telegram_id']}"
+
+            duels_text = f"🎮 Последние дуэли {username}\n\n"
+
+            for duel in duels:
+                date_str = duel['finished_at'].strftime('%d.%m %H:%M')
+                won = (duel['winner_id'] == user_info['telegram_id'])
+                result_emoji = "🏆" if won else "💔"
+                coin_result = "ОРЕЛ" if duel['coin_result'] == 'heads' else "РЕШКА"
+
+                duels_text += f"{result_emoji} Дуэль #{duel['id']}\n"
+                duels_text += f"   💰 Ставка: {duel['stake']:,.0f} MORI\n"
+                duels_text += f"   🪙 Выпал: {coin_result}\n"
+                if won and duel['winner_amount']:
+                    duels_text += f"   🎉 Выигрыш: {duel['winner_amount']:,.2f} MORI\n"
+                duels_text += f"   📅 {date_str}\n\n"
+
+        await callback.message.edit_text(
+            duels_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад к пользователю", callback_data="admin_search_user")]
+            ])
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Error showing user duels: {e}")
+        await callback.answer("❌ Ошибка загрузки дуэлей", show_alert=True)
+
+    await callback.answer()
+
+
 
 
 @router.callback_query(F.data == "admin_pending_tx")
@@ -760,7 +1073,7 @@ async def get_pending_transactions_details() -> list:
                     u.username, u.telegram_id as user_id
                 FROM transactions t
                 LEFT JOIN users u ON t.user_id = u.id
-                WHERE t.status = 'pending'
+                WHERE t.status = 'pending'::transactionstatus
                 ORDER BY t.created_at DESC
                 LIMIT 20
             """))

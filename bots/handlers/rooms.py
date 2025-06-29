@@ -276,9 +276,18 @@ async def create_room_with_stake(callback, user_id: int, stake: Decimal):
 
 @router.callback_query(F.data.startswith("copy_room_"))
 async def copy_room_code(callback: CallbackQuery):
-    """Копировать код комнаты"""
+    """Показать код комнаты для копирования"""
     room_code = callback.data.split("_")[2]
-    await callback.answer(f"📋 Код скопирован: {room_code}", show_alert=True)
+
+    await callback.message.answer(
+        f"📋 Код вашей комнаты:\n\n`{room_code}`\n\n"
+        "👆 Нажмите на код выше, чтобы выделить и скопировать",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад к комнате", callback_data="rooms")]
+        ])
+    )
+    await callback.answer("📋 Код отправлен отдельным сообщением")
 
 
 @router.callback_query(F.data.startswith("close_room_"))

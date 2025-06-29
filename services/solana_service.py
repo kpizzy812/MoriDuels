@@ -56,7 +56,14 @@ class SolanaService:
                 # Парсим приватный ключ (предполагаем формат base58)
                 import base58
                 private_key_bytes = base58.b58decode(BOT_PRIVATE_KEY)
-                self.bot_keypair = Keypair.from_bytes(private_key_bytes[:32])
+                # Solana использует 64-байтные ключи, но Keypair.from_bytes ожидает первые 32 байта
+                if len(private_key_bytes) == 64:
+                    private_key_bytes = private_key_bytes[:32]
+                elif len(private_key_bytes) != 32:
+                    logger.error(f"❌ Invalid private key length: {len(private_key_bytes)}, expected 32 or 64 bytes")
+                    return
+
+                self.bot_keypair = Keypair.from_bytes(private_key_bytes)
                 self.bot_pubkey = self.bot_keypair.pubkey()
                 logger.info(f"✅ Bot wallet initialized: {str(self.bot_pubkey)[:8]}...")
 

@@ -239,12 +239,15 @@ async def test_basic_flow():
 
         # Тест валидации кошелька
         from services.solana_service import validate_solana_address
+        from config.settings import BOT_WALLET_ADDRESS
 
         test_addresses = [
             "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",  # Валидный
             "invalid_address",  # Невалидный
-            BOT_WALLET_ADDRESS  # Кошелек бота
         ]
+
+        if BOT_WALLET_ADDRESS:
+            test_addresses.append(BOT_WALLET_ADDRESS)  # Кошелек бота
 
         for addr in test_addresses:
             is_valid = validate_solana_address(addr)
